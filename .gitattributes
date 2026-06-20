@@ -1,0 +1,7 @@
+
+# dejavue: append-only files use git's union merge driver
+.dejavue/timeline.jsonl merge=union
+.dejavue/decisions.md   merge=union
+.dejavue/invariants.md  merge=union
+.dejavue/patterns.md    merge=union
+
