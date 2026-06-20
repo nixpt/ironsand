@@ -20,3 +20,12 @@ rustc_codegen_nvvm C++ shim targets the LLVM 7/19 API (legacy Pass Manager). Ver
 Rejected alternatives:
 - **system LLVM 22**: real porting effort, not a flag — off the table for now
 
+
+## 2026-06-20T16:37:55-05:00 — [TACTICAL] GEMV reduction via shared memory, not warp shuffle
+
+Reason:
+warp_shuffle_xor crashes libnvvm (see trap). Block-per-row + shared-mem tree reduction (gemv_block) is coalesced, compiles cleanly, and matches/beats cuBLAS N=1. gemv_warp kept as source for when the shuffle path is fixed.
+
+Rejected alternatives:
+- **warp-shuffle butterfly reduction**: SIGSEGVs libnvvm during PTX gen
+

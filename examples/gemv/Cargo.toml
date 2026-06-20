@@ -1,0 +1,14 @@
+[package]
+name = "gemv"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+blastoff = { path = "../../crates/blastoff" }
+cust = { path = "../../crates/cust" }
+cust_raw = { path = "../../crates/cust_raw", features = ["driver"] }
+ndarray = { version = "0.16", features = ["approx"] }
+ndarray-rand = "0.15.0"
+
+[build-dependencies]
+cuda_builder = { workspace = true, default-features = false, features = ["rustc_codegen_nvvm", "llvm19"] }

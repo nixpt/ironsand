@@ -768,6 +768,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "gemv"
+version = "0.1.0"
+dependencies = [
+ "blastoff",
+ "cuda_builder",
+ "cust",
+ "cust_raw",
+ "ndarray",
+ "ndarray-rand",
+]
+
+[[package]]
+name = "gemv-kernels"
+version = "0.1.0"
+dependencies = [
+ "cuda_std",
+]
+
+[[package]]
 name = "getopts"
 version = "0.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
