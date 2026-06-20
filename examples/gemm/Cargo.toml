@@ -14,4 +14,4 @@ ndarray-rand = "0.15.0"
 rand = "0.9"
 
 [build-dependencies]
-cuda_builder = { workspace = true, default-features = false }
+cuda_builder = { workspace = true, default-features = false, features = ["rustc_codegen_nvvm", "llvm19"] }

@@ -8,4 +8,4 @@ cust = { path = "../../../crates/cust" }
 cuda_std = { path = "../../../crates/cuda_std" }
 
 [build-dependencies]
-cuda_builder = { workspace = true, default-features = false }
+cuda_builder = { workspace = true, default-features = false, features = ["rustc_codegen_nvvm", "llvm19"] }

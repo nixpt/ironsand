@@ -24,6 +24,11 @@ members = [
   "examples/vecadd",
   "examples/vecadd/kernels",
 
+  # async_api: trivial kernel, but a reference for the host-side async stream +
+  # event overlap pattern (relevant to inference pipelining: overlapping KV/host
+  # copies with decode, multi-stream batching).
+  "samples/introduction/async_api",
+  "samples/introduction/async_api/kernels",
   "samples/introduction/matmul",
   "samples/introduction/matmul/kernels",
 

@@ -1,11 +1,10 @@
 [package]
-name = "vecadd"
+name = "async_api"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-cust = { path = "../../crates/cust" }
-cust_raw = { path = "../../crates/cust_raw", default-features = false, features = ["driver"] }
+cust = { path = "../../../crates/cust" }
 nanorand = "0.7"
 
 [build-dependencies]
