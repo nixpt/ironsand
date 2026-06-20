@@ -210,6 +210,81 @@ fn main() -> Result<(), Box<dyn Error>> {
             report(&label, label_k, ms, f16_bytes, &check(&stream, &mut y_gpu, m, &y_ref_f16)?);
         }
 
+        // --- int8 weights (quantized decode: ¼ the bytes of f32) --------------
+        // Per-row symmetric int8 quant for A; per-vector int8 quant for x.
+        let mut a_q8 = vec![0u8; m * k];
+        let mut scale_a = vec![0.0f32; m];
+        for i in 0..m {
+            let amax = (0..k).fold(0.0f32, |acc, j| acc.max(a[[i, j]].abs()));
+            let s = if amax > 0.0 { amax / 127.0 } else { 1.0 };
+            scale_a[i] = s;
+            for j in 0..k {
+                a_q8[i * k + j] = ((a[[i, j]] / s).round().clamp(-127.0, 127.0) as i8) as u8;
+            }
+        }
+        let xmax = x.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
+        let sx = if xmax > 0.0 { xmax / 127.0 } else { 1.0 };
+        let x_q8: Vec<u8> = x
+            .iter()
+            .map(|&v| ((v / sx).round().clamp(-127.0, 127.0) as i8) as u8)
+            .collect();
+
+        // References from the quantized data (f64).
+        let mut y_ref_w8 = Array1::<f64>::zeros(m);
+        let mut y_ref_dp4a = Array1::<f64>::zeros(m);
+        for i in 0..m {
+            let (mut s1, mut s2) = (0.0f64, 0i64);
+            for j in 0..k {
+                let q = a_q8[i * k + j] as i8 as f64;
+                s1 += q * x[j] as f64;
+                s2 += (a_q8[i * k + j] as i8 as i64) * (x_q8[j] as i8 as i64);
+            }
+            y_ref_w8[i] = scale_a[i] as f64 * s1;
+            y_ref_dp4a[i] = scale_a[i] as f64 * sx as f64 * s2 as f64;
+        }
+
+        let aq_gpu = a_q8.as_slice().as_dbuf()?;
+        let sa_gpu = scale_a.as_slice().as_dbuf()?;
+        let xq_gpu = x_q8.as_slice().as_dbuf()?;
+        let i8_bytes = (m * k) as f64;
+        stream.synchronize()?;
+
+        // W8A32 (int8 weights, f32 activations)
+        let i8w = module.get_function("gemv_i8_warp")?;
+        let run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32;
+            let grid = (m as u32).div_ceil(block / 32);
+            unsafe {
+                launch!(i8w<<<grid, block, 0, stream>>>(
+                    aq_gpu.as_device_ptr(), aq_gpu.len(),
+                    sa_gpu.as_device_ptr(), sa_gpu.len(),
+                    x_gpu.as_device_ptr(), x_gpu.len(),
+                    y_gpu.as_device_ptr(), m, k, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+        report(&label, "i8 W8A32", ms, i8_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_w8, 0.03)?);
+
+        // W8A8 via dp4a (int8 weights × int8 activations)
+        let i8d = module.get_function("gemv_i8_dp4a")?;
+        let run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32;
+            let grid = (m as u32).div_ceil(block / 32);
+            unsafe {
+                launch!(i8d<<<grid, block, 0, stream>>>(
+                    aq_gpu.as_device_ptr(), aq_gpu.len(),
+                    sa_gpu.as_device_ptr(), sa_gpu.len(),
+                    xq_gpu.as_device_ptr(), xq_gpu.len(),
+                    sx, y_gpu.as_device_ptr(), m, k, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+        report(&label, "i8 dp4a", ms, i8_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_dp4a, 0.05)?);
+
         println!();
     }
 
@@ -253,6 +328,30 @@ fn check(
         max_rel = max_rel.max(((got as f64) - want).abs() / denom);
     }
     Ok(if max_rel <= EPS as f64 {
+        "ok".to_string()
+    } else {
+        format!("FAIL ({max_rel:.3})")
+    })
+}
+
+/// Like [`check`] but with an explicit relative-error tolerance (quantized
+/// kernels carry more rounding than f32/f16).
+fn check_eps(
+    stream: &Stream,
+    y_gpu: &mut DeviceBuffer<f32>,
+    m: usize,
+    y_ref: &Array1<f64>,
+    eps: f64,
+) -> Result<String, Box<dyn Error>> {
+    stream.synchronize()?;
+    let mut host = vec![0.0f32; m];
+    y_gpu.copy_to(&mut host)?;
+    let mut max_rel = 0.0f64;
+    for (i, &got) in host.iter().enumerate() {
+        let want = y_ref[i];
+        max_rel = max_rel.max(((got as f64) - want).abs() / want.abs().max(1.0));
+    }
+    Ok(if max_rel <= eps {
         "ok".to_string()
     } else {
         format!("FAIL ({max_rel:.3})")
