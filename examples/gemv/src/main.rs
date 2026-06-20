@@ -285,6 +285,55 @@ fn main() -> Result<(), Box<dyn Error>> {
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
         report(&label, "i8 dp4a", ms, i8_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_dp4a, 0.05)?);
 
+        // --- ternary i2_s (BitNet: 2 bits/weight) -----------------------------
+        // Per-row ternary quant, scale = mean(|row|); codes = w+1 ∈ {0,1,2}
+        // packed 16 per u32. Reuses the int8 activations (x_q8, sx) from above.
+        let kw = k / 16;
+        let mut w_tern = vec![0u32; m * kw];
+        let mut scale_w = vec![0.0f32; m];
+        for i in 0..m {
+            let mean_abs =
+                (0..k).map(|j| a[[i, j]].abs() as f64).sum::<f64>() / k as f64;
+            let s = (mean_abs as f32).max(1e-8);
+            scale_w[i] = s;
+            for j in 0..k {
+                let t = (a[[i, j]] / s).round().clamp(-1.0, 1.0) as i32; // {-1,0,1}
+                w_tern[i * kw + j / 16] |= ((t + 1) as u32) << ((j % 16) * 2);
+            }
+        }
+        // Reference decoded from the packed words (also validates packing).
+        let mut y_ref_tern = Array1::<f64>::zeros(m);
+        for i in 0..m {
+            let mut s = 0i64;
+            for j in 0..k {
+                let code = (w_tern[i * kw + j / 16] >> ((j % 16) * 2)) & 0x3;
+                s += (code as i64 - 1) * (x_q8[j] as i8 as i64);
+            }
+            y_ref_tern[i] = scale_w[i] as f64 * sx as f64 * s as f64;
+        }
+
+        let wt_gpu = w_tern.as_slice().as_dbuf()?;
+        let sw_gpu = scale_w.as_slice().as_dbuf()?;
+        let tern_bytes = (m * k / 4) as f64; // 2 bits/weight
+        stream.synchronize()?;
+
+        let tk = module.get_function("gemv_ternary_warp")?;
+        let run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32;
+            let grid = (m as u32).div_ceil(block / 32);
+            unsafe {
+                launch!(tk<<<grid, block, 0, stream>>>(
+                    wt_gpu.as_device_ptr(), wt_gpu.len(),
+                    sw_gpu.as_device_ptr(), sw_gpu.len(),
+                    xq_gpu.as_device_ptr(), xq_gpu.len(),
+                    sx, y_gpu.as_device_ptr(), m, k, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+        report(&label, "ternary", ms, tern_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_tern, 0.02)?);
+
         println!();
     }
 

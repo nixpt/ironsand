@@ -8,16 +8,19 @@
 //! `gemv_f16_warp`, `gemv_f16_vec4`.
 //! int8 variants (quantized decode — ¼ the bytes of f32): `gemv_i8_warp`
 //! (W8A32), `gemv_i8_dp4a` (W8A8, dp4a integer dot).
+//! ternary variant (zorro's BitNet i2_s — 2 bits/weight): `gemv_ternary_warp`.
 #![cfg_attr(target_os = "cuda", feature(asm_experimental_arch))]
 
 mod gemv_block;
 mod gemv_f16;
 mod gemv_i8;
 mod gemv_naive;
+mod gemv_ternary;
 mod gemv_warp;
 
 pub use crate::gemv_block::gemv_block;
 pub use crate::gemv_f16::{gemv_f16_vec4, gemv_f16_warp};
 pub use crate::gemv_i8::{gemv_i8_dp4a, gemv_i8_warp};
 pub use crate::gemv_naive::gemv_naive;
+pub use crate::gemv_ternary::gemv_ternary_warp;
 pub use crate::gemv_warp::gemv_warp;
