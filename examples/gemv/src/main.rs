@@ -353,6 +353,35 @@ fn main() -> Result<(), Box<dyn Error>> {
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
         report(&label, "tern dp4a", ms, tern_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_tern, 0.02)?);
 
+        // --- Q4_K (GGUF 4-bit k-quant, 4.5 bits/weight) -----------------------
+        // Q4_K super-blocks are 256 weights; only applicable when k % 256 == 0.
+        if k % 256 == 0 {
+        let (q4k_blocks, a_deq) = quantize_q4k(&a, m, k);
+        let y_ref_q4k: Array1<f64> = {
+            let ad = ndarray::Array2::from_shape_vec((m, k), a_deq).unwrap().mapv(|v| v as f64);
+            ad.dot(&x.mapv(|v| v as f64))
+        };
+        let q4k_gpu = q4k_blocks.as_slice().as_dbuf()?;
+        let q4k_bytes = (m * (k / 256) * 144) as f64; // real Q4_K storage = m*k*0.5625
+        stream.synchronize()?;
+
+        let q4k = module.get_function("gemv_q4k_warp")?;
+        let run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32;
+            let grid = (m as u32).div_ceil(block / 32);
+            unsafe {
+                launch!(q4k<<<grid, block, 0, stream>>>(
+                    q4k_gpu.as_device_ptr(), q4k_gpu.len(),
+                    x_gpu.as_device_ptr(), x_gpu.len(),
+                    y_gpu.as_device_ptr(), m, k, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+        report(&label, "Q4_K", ms, q4k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?);
+        }
+
         println!();
     }
 
@@ -377,6 +406,79 @@ where
     end.record(stream)?;
     end.synchronize()?;
     Ok(end.elapsed_time_f32(&beg)? / runs as f32)
+}
+
+/// Quantize a row-major `m x k` f32 matrix to byte-faithful Q4_K super-blocks
+/// (`k % 256 == 0`). Returns the packed blocks and the dequantized weights
+/// (what the format represents) for the GEMV reference.
+fn quantize_q4k(a: &Array2<f32>, m: usize, k: usize) -> (Vec<u8>, Vec<f32>) {
+    let nb = k / 256;
+    let mut blocks = vec![0u8; m * nb * 144];
+    let mut a_deq = vec![0.0f32; m * k];
+    for i in 0..m {
+        for bk in 0..nb {
+            let wbase = bk * 256;
+            let mut sub_scale = [0.0f32; 8];
+            let mut sub_off = [0.0f32; 8];
+            let mut q = [0u8; 256];
+            for sb in 0..8 {
+                let (mut mn, mut mx) = (f32::INFINITY, f32::NEG_INFINITY);
+                for l in 0..32 {
+                    let v = a[[i, wbase + sb * 32 + l]];
+                    mn = mn.min(v);
+                    mx = mx.max(v);
+                }
+                let sc = ((mx - mn) / 15.0).max(1e-8);
+                sub_scale[sb] = sc;
+                sub_off[sb] = (-mn).max(0.0); // affine offset (data here has mn<0)
+                for l in 0..32 {
+                    let qq = (((a[[i, wbase + sb * 32 + l]] - mn) / sc).round()).clamp(0.0, 15.0);
+                    q[sb * 32 + l] = qq as u8;
+                }
+            }
+            let d = (sub_scale.iter().cloned().fold(0.0f32, f32::max).max(1e-8)) / 63.0;
+            let doff = (sub_off.iter().cloned().fold(0.0f32, f32::max).max(1e-8)) / 63.0;
+            let mut sc6 = [0u8; 8];
+            let mut mn6 = [0u8; 8];
+            for sb in 0..8 {
+                sc6[sb] = (sub_scale[sb] / d).round().clamp(0.0, 63.0) as u8;
+                mn6[sb] = (sub_off[sb] / doff).round().clamp(0.0, 63.0) as u8;
+            }
+            let base = (i * nb + bk) * 144;
+            let dh = half::f16::from_f32(d).to_bits();
+            let dmh = half::f16::from_f32(doff).to_bits();
+            blocks[base] = dh as u8;
+            blocks[base + 1] = (dh >> 8) as u8;
+            blocks[base + 2] = dmh as u8;
+            blocks[base + 3] = (dmh >> 8) as u8;
+            // pack scales[12] (inverse of llama.cpp get_scale_min_k4)
+            let sb0 = base + 4;
+            for j in 0..4 {
+                blocks[sb0 + j] = (sc6[j] & 63) | ((sc6[j + 4] >> 4) << 6);
+                blocks[sb0 + j + 4] = (mn6[j] & 63) | ((mn6[j + 4] >> 4) << 6);
+                blocks[sb0 + j + 8] = (sc6[j + 4] & 0xF) | ((mn6[j + 4] & 0xF) << 4);
+            }
+            // pack qs[128]: group g low nibble = sub 2g, high nibble = sub 2g+1
+            let qb = base + 16;
+            for g in 0..4 {
+                for l in 0..32 {
+                    blocks[qb + g * 32 + l] = q[2 * g * 32 + l] | (q[(2 * g + 1) * 32 + l] << 4);
+                }
+            }
+            // dequant reference (f16-rounded d/dmin, as the kernel reads them)
+            let df = half::f16::from_f32(d).to_f32();
+            let dmf = half::f16::from_f32(doff).to_f32();
+            for sb in 0..8 {
+                let d_eff = df * sc6[sb] as f32;
+                let m_eff = dmf * mn6[sb] as f32;
+                for l in 0..32 {
+                    a_deq[i * k + wbase + sb * 32 + l] =
+                        d_eff * (q[sb * 32 + l] as f32) - m_eff;
+                }
+            }
+        }
+    }
+    (blocks, a_deq)
 }
 
 /// Copy `y_gpu` back and compare to the f64 reference; return "ok" / "FAIL".
