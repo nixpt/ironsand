@@ -1,0 +1,208 @@
+name: Build CI Container Images
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/container_images.yml"
+      - "container/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/container_images.yml"
+      - "container/**"
+env:
+  REGISTRY: ghcr.io
+jobs:
+  build-images:
+    name: Build ${{ matrix.variance.name }} (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+        variance:
+          - name: Ubuntu-24.04/CUDA-12.8.1
+            image: "rust-gpu/rust-cuda-ubuntu24-cuda12"
+            dockerfile: ./container/ubuntu24-cuda12/Dockerfile
+          - name: Ubuntu-24.04/CUDA-13.0.2
+            image: "rust-gpu/rust-cuda-ubuntu24-cuda13"
+            dockerfile: ./container/ubuntu24-cuda13/Dockerfile
+          - name: RockyLinux-9/CUDA-12.8.1
+            image: "rust-gpu/rust-cuda-rockylinux9-cuda12"
+            dockerfile: ./container/rockylinux9-cuda12/Dockerfile
+          - name: RockyLinux-9/CUDA-13.0.2
+            image: "rust-gpu/rust-cuda-rockylinux9-cuda13"
+            dockerfile: ./container/rockylinux9-cuda13/Dockerfile
+    steps:
+      - name: Free up space
+        # Without this the job will likely run out of disk space.
+        run: |
+          df -h
+
+          # Remove Java
+          sudo rm -rf /usr/lib/jvm
+
+          # Remove .NET
+          sudo rm -rf /usr/share/dotnet
+
+          # Remove Swift
+          sudo rm -rf /usr/share/swift
+
+          # Remove Haskell
+          sudo rm -rf /usr/local/.ghcup
+
+          # Remove Julia
+          sudo rm -rf /usr/local/julia*
+
+          # Remove Android SDKs
+          sudo rm -rf /usr/local/lib/android
+
+          # Remove Chromium
+          sudo rm -rf /usr/local/share/chromium
+
+          # Remove Microsoft/Edge and Google Chrome builds
+          sudo rm -rf /opt/microsoft /opt/google
+
+          # Remove Azure CLI
+          sudo rm -rf /opt/az
+
+          # Remove PowerShell
+          sudo rm -rf /usr/local/share/powershell
+
+          # Remove CodeQL and other toolcaches
+          sudo rm -rf /opt/hostedtoolcache
+
+          docker system prune -af || true
+          docker builder prune -af || true
+          df -h
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Validate platform
+        run: |
+          ARCH=$(uname -m)
+          if [[ "${{ matrix.platform.arch }}" == "amd64" && "$ARCH" != "x86_64" ]]; then
+            echo "Error: Expected x86_64 but got $ARCH"
+            exit 1
+          fi
+          if [[ "${{ matrix.platform.arch }}" == "arm64" && "$ARCH" != "aarch64" ]]; then
+            echo "Error: Expected aarch64 but got $ARCH"
+            exit 1
+          fi
+          echo "Platform validation passed: $ARCH matches ${{ matrix.platform.arch }}"
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata (tags, labels) for containers
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ matrix.variance.image }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.variance.dockerfile }}
+          platforms: linux/${{ matrix.platform.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ matrix.variance.image }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Set artifact name
+        if: github.event_name != 'pull_request'
+        run: |
+          ARTIFACT_NAME="${{ matrix.variance.image }}"
+          ARTIFACT_NAME="${ARTIFACT_NAME#*/}"  # Remove everything before and including the slash
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.ARTIFACT_NAME }}-${{ matrix.platform.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-manifests:
+    name: Create manifest for ${{ matrix.variance.name }}
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    needs: build-images
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variance:
+          - name: Ubuntu-24.04/CUDA-12.8.1
+            image: "rust-gpu/rust-cuda-ubuntu24-cuda12"
+          - name: Ubuntu-24.04/CUDA-13.0.2
+            image: "rust-gpu/rust-cuda-ubuntu24-cuda13"
+          - name: RockyLinux-9/CUDA-12.8.1
+            image: "rust-gpu/rust-cuda-rockylinux9-cuda12"
+          - name: RockyLinux-9/CUDA-13.0.2
+            image: "rust-gpu/rust-cuda-rockylinux9-cuda13"
+    steps:
+      - name: Set artifact name
+        run: |
+          ARTIFACT_NAME="${{ matrix.variance.image }}"
+          ARTIFACT_NAME="${ARTIFACT_NAME#*/}"  # Remove everything before and including the slash
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ env.ARTIFACT_NAME }}-*
+          merge-multiple: true
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ matrix.variance.image }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Login to Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ matrix.variance.image }}@sha256:%s ' *)
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ matrix.variance.image }}:${{ steps.meta.outputs.version }}

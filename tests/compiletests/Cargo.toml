@@ -1,0 +1,17 @@
+[package]
+name = "compiletests"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "compiletests"
+path = "src/main.rs"
+
+[dependencies]
+compiletest_rs = "0.11"
+clap = { version = "4.5", features = ["derive"] }
+nvvm = { path = "../../crates/nvvm" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+cuda_builder = { workspace = true }
+rustc_codegen_nvvm = { workspace = true }

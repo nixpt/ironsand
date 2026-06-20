@@ -1,0 +1,8 @@
+book
+/target
+**/.vscode
+.devcontainer
+.codex
+rustc-ice-*.txt
+.nix-driver-libs
+.claude

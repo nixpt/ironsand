@@ -1,0 +1,28 @@
+[package]
+name = "optix"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rust-GPU/rust-cuda"
+readme = "../../README.md"
+authors = ["Anders Langlands <anderslanglands@gmail.com>", "Riccardo D'Ambrosio <rdambrosio016@gmail.com>"]
+
+[dependencies]
+cust = { version = "0.3", path = "../cust", features=["impl_mint"] }
+cust_raw = { version = "0.11.3", path = "../cust_raw", features=["driver"] }
+cfg-if = "1.0.0"
+bitflags = "2.9.0"
+glam = { version = "0.30", features=["cuda", "libm"], default-features=false, optional=true }
+half = { version = "2.4.1", optional = true }
+memoffset = "0.9.1"
+mint = "0.5.9"
+embed-doc-image = {version = "0.1.4"}
+optix-sys = { path = "../optix-sys", default-features = false }
+
+[features]
+default=["impl_glam"]
+impl_glam=["cust/impl_glam", "glam"]
+impl_half=["cust/impl_half", "half"]
+
+[package.metadata.docs.rs]
+rustdoc-args = [ "--html-in-header", "katex-header.html" ]

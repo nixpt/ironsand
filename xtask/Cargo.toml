@@ -1,0 +1,10 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+pico-args = "0.4.2"
+rayon = "1.10"
+regex = "1.11.1"
