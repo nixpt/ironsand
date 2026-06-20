@@ -397,6 +397,31 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
         report(&label, "Q4_K fast", ms, q4k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?);
+
+        // --- Q6_K (GGUF 6-bit k-quant, the lm_head format) ------------------
+        let (q6k_blocks, a6_deq) = quantize_q6k(&a, m, k);
+        let y_ref_q6k: Array1<f64> = {
+            let ad = ndarray::Array2::from_shape_vec((m, k), a6_deq).unwrap().mapv(|v| v as f64);
+            ad.dot(&x.mapv(|v| v as f64))
+        };
+        let q6k_gpu = q6k_blocks.as_slice().as_dbuf()?;
+        let q6k_bytes = (m * (k / 256) * 210) as f64; // 6.5625 bits/weight
+        stream.synchronize()?;
+        let q6k = module.get_function("gemv_q6k_warp")?;
+        let run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32;
+            let grid = (m as u32).div_ceil(block / 32);
+            unsafe {
+                launch!(q6k<<<grid, block, 0, stream>>>(
+                    q6k_gpu.as_device_ptr(), q6k_gpu.len(),
+                    x_gpu.as_device_ptr(), x_gpu.len(),
+                    y_gpu.as_device_ptr(), m, k, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+        report(&label, "Q6_K", ms, q6k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k, 0.02)?);
         }
 
         println!();
@@ -492,6 +517,71 @@ fn quantize_q4k(a: &Array2<f32>, m: usize, k: usize) -> (Vec<u8>, Vec<f32>) {
                     a_deq[i * k + wbase + sb * 32 + l] =
                         d_eff * (q[sb * 32 + l] as f32) - m_eff;
                 }
+            }
+        }
+    }
+    (blocks, a_deq)
+}
+
+/// Quantize a row-major `m x k` f32 matrix to byte-faithful Q6_K super-blocks
+/// (`k % 256 == 0`). Returns the packed blocks and the dequantized weights.
+fn quantize_q6k(a: &Array2<f32>, m: usize, k: usize) -> (Vec<u8>, Vec<f32>) {
+    let nb = k / 256;
+    let mut blocks = vec![0u8; m * nb * 210];
+    let mut a_deq = vec![0.0f32; m * k];
+    for i in 0..m {
+        for bk in 0..nb {
+            let wbase = bk * 256;
+            let mut scale_sb = [0.0f32; 16];
+            let mut q6 = [0u8; 256];
+            for sb in 0..16 {
+                let mut amax = 0.0f32;
+                for l in 0..16 {
+                    amax = amax.max(a[[i, wbase + sb * 16 + l]].abs());
+                }
+                let s = (amax / 32.0).max(1e-8);
+                scale_sb[sb] = s;
+                for l in 0..16 {
+                    let q = ((a[[i, wbase + sb * 16 + l]] / s).round() + 32.0).clamp(0.0, 63.0);
+                    q6[sb * 16 + l] = q as u8;
+                }
+            }
+            let d = (scale_sb.iter().cloned().fold(0.0f32, f32::max).max(1e-8)) / 127.0;
+            let mut sc8 = [0i8; 16];
+            for sb in 0..16 {
+                sc8[sb] = (scale_sb[sb] / d).round().clamp(-127.0, 127.0) as i8;
+            }
+            let base = (i * nb + bk) * 210;
+            // pack ql (low nibble) + qh (2 high bits) per llama.cpp interleaving
+            for p in 0..256 {
+                let group = p / 128;
+                let pos = p % 128;
+                let q = q6[p];
+                let (lo, hi) = (q & 0xF, q >> 4);
+                let (ql_off, ql_high, qh_off, qh_shift) = match pos / 32 {
+                    0 => (group * 64 + pos, false, group * 32 + pos, 0u8),
+                    1 => (group * 64 + (pos - 32) + 32, false, group * 32 + (pos - 32), 2),
+                    2 => (group * 64 + (pos - 64), true, group * 32 + (pos - 64), 4),
+                    _ => (group * 64 + (pos - 96) + 32, true, group * 32 + (pos - 96), 6),
+                };
+                if ql_high {
+                    blocks[base + ql_off] |= lo << 4;
+                } else {
+                    blocks[base + ql_off] |= lo;
+                }
+                blocks[base + 128 + qh_off] |= hi << qh_shift;
+            }
+            for sb in 0..16 {
+                blocks[base + 192 + sb] = sc8[sb] as u8;
+            }
+            let dh = half::f16::from_f32(d).to_bits();
+            blocks[base + 208] = dh as u8;
+            blocks[base + 209] = (dh >> 8) as u8;
+            // dequant reference
+            let df = half::f16::from_f32(d).to_f32();
+            for p in 0..256 {
+                let sb = p / 16;
+                a_deq[i * k + wbase + p] = df * (sc8[sb] as f32) * (q6[p] as f32 - 32.0);
             }
         }
     }
