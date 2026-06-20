@@ -380,6 +380,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
         report(&label, "Q4_K", ms, q4k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?);
+
+        // optimized: lane owns whole sub-blocks (header decode amortized 32x)
+        let q4kf = module.get_function("gemv_q4k_fast")?;
+        let run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32;
+            let grid = (m as u32).div_ceil(block / 32);
+            unsafe {
+                launch!(q4kf<<<grid, block, 0, stream>>>(
+                    q4k_gpu.as_device_ptr(), q4k_gpu.len(),
+                    x_gpu.as_device_ptr(), x_gpu.len(),
+                    y_gpu.as_device_ptr(), m, k, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+        report(&label, "Q4_K fast", ms, q4k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?);
         }
 
         println!();

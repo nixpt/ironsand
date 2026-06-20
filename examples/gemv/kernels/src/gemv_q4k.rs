@@ -130,3 +130,70 @@ pub unsafe fn gemv_q4k_warp(
         *e = sum + beta * *e;
     }
 }
+
+/// Optimized Q4_K GEMV: decode the super-block `d`/`dmin` once per 256 weights.
+///
+/// [`gemv_q4k_warp`] keeps the coalesced lane=weight layout (good), but its loop
+/// is per sub-block, so it re-`cvt_f16`s the super-block `d` and `dmin` on every
+/// one of the 8 sub-blocks — 8× redundant. Here the outer loop is per
+/// super-block: decode `d`/`dmin` once, then an inner loop over the 8 sub-blocks
+/// does only the per-sub-block `get_scale_min_k4` + the coalesced nibble read.
+/// Same memory access pattern, fewer f16 conversions.
+///
+/// (An earlier attempt that made each lane own whole sub-blocks amortized the
+/// header decode but scattered the nibble reads and ran ~1.6× *slower* —
+/// coalescing dominates the header ALU here.)
+///
+/// # Safety
+/// As [`gemv_q4k_warp`].
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn gemv_q4k_fast(
+    a: &[u8],
+    x: &[f32],
+    y: *mut f32,
+    m: usize,
+    k: usize,
+    beta: f32,
+) {
+    let tid = thread::block_dim_x() * thread::block_idx_x() + thread::thread_idx_x();
+    let row = (tid / WARP) as usize;
+    let lane = tid % WARP;
+    if row >= m {
+        return;
+    }
+    let nb = k / 256;
+    let row_base = row * nb * BLK;
+    let aptr = a.as_ptr();
+
+    let mut acc = 0.0f32;
+    let mut b = 0usize;
+    while b < nb {
+        let bbase = row_base + b * BLK;
+        // Decoded once per super-block (8× fewer than the per-sub-block kernel).
+        let d = unsafe { cvt_f16(load_u16(aptr, bbase)) };
+        let dmin = unsafe { cvt_f16(load_u16(aptr, bbase + 2)) };
+        let scbase = bbase + 4;
+
+        let mut sub = 0usize;
+        while sub < 8 {
+            let (sc, mn) = unsafe { scale_min(sub, aptr.add(scbase)) };
+            let d_eff = d * sc as f32;
+            let m_eff = dmin * mn as f32;
+            let g = sub >> 1;
+            let qbase = bbase + 16 + g * 32;
+            let byte = unsafe { *aptr.add(qbase + lane as usize) }; // coalesced
+            let nib = if (sub & 1) == 1 { byte >> 4 } else { byte & 0xF };
+            let gw = b * 256 + sub * 32 + lane as usize;
+            acc += (d_eff * (nib as f32) - m_eff) * x[gw];
+            sub += 1;
+        }
+        b += 1;
+    }
+
+    let sum = unsafe { warp_sum_f32(acc) };
+    if lane == 0 {
+        let e = unsafe { &mut *y.add(row) };
+        *e = sum + beta * *e;
+    }
+}
