@@ -142,6 +142,74 @@ fn main() -> Result<(), Box<dyn Error>> {
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, warp_run)?;
         report(&label, "rust warp", ms, a_bytes, &check(&stream, &mut y_gpu, m, &y_ref)?);
 
+        // --- f16 weights (the inference case: half the bytes) -----------------
+        // Round A to f16, upload as raw u16 bits, and compute an f16-rounded
+        // reference so correctness reflects what the f16 kernels should produce.
+        let a_f16_bits: Vec<u16> = a
+            .as_standard_layout()
+            .iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
+        let y_ref_f16: Array1<f64> = {
+            let a_rounded = a.mapv(|v| half::f16::from_f32(v).to_f32() as f64);
+            let x64 = x.mapv(|v| v as f64);
+            a_rounded.dot(&x64) * alpha as f64
+        };
+        let a16_gpu = a_f16_bits.as_slice().as_dbuf()?;
+        let f16_bytes = (m * k * std::mem::size_of::<u16>()) as f64;
+        stream.synchronize()?;
+
+        // cuBLAS f16 (hgemm) N=1 — the fair f16 vendor baseline.
+        {
+            let a_f16: Vec<half::f16> =
+                a.as_standard_layout().iter().map(|&v| half::f16::from_f32(v)).collect();
+            let x_f16: Vec<half::f16> = x.iter().map(|&v| half::f16::from_f32(v)).collect();
+            let a16f = a_f16.as_slice().as_dbuf()?;
+            let x16f = x_f16.as_slice().as_dbuf()?;
+            let mut y16f = vec![half::f16::ZERO; m].as_slice().as_dbuf()?;
+            let alpha16 = DeviceBox::new(&half::f16::from_f32(alpha))?;
+            let beta16 = DeviceBox::new(&half::f16::from_f32(beta))?;
+            let run = |cublas: &mut CublasContext, y: &mut DeviceBuffer<half::f16>| -> Result<(), Box<dyn Error>> {
+                cublas.gemm::<half::f16>(
+                    &stream, m, 1, k,
+                    &alpha16, &a16f, k, MatrixOp::Transpose,
+                    &beta16, &x16f, k, MatrixOp::None,
+                    y, m,
+                )?;
+                Ok(())
+            };
+            let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, || run(&mut cublas, &mut y16f))?;
+            stream.synchronize()?;
+            let mut host = vec![half::f16::ZERO; m];
+            y16f.copy_to(&mut host)?;
+            let mut max_rel = 0.0f64;
+            for (i, &got) in host.iter().enumerate() {
+                let want = y_ref_f16[i];
+                max_rel = max_rel.max(((got.to_f32() as f64) - want).abs() / want.abs().max(1.0));
+            }
+            // f16 accumulation (cublasHgemm) is lossy over large k; allow a wider band.
+            let res = if max_rel <= 0.10 { "ok".to_string() } else { format!("FAIL ({max_rel:.3})") };
+            report(&label, "cuBLAS f16", ms, f16_bytes, &res);
+        }
+
+        for (kname, label_k) in [("gemv_f16_warp", "f16 warp"), ("gemv_f16_vec4", "f16 vec4")] {
+            let kf = module.get_function(kname)?;
+            let run = || -> Result<(), Box<dyn Error>> {
+                let block = 256u32; // 8 warps/block
+                let grid = (m as u32).div_ceil(block / 32);
+                unsafe {
+                    launch!(kf<<<grid, block, 0, stream>>>(
+                        a16_gpu.as_device_ptr(), a16_gpu.len(),
+                        x_gpu.as_device_ptr(), x_gpu.len(),
+                        y_gpu.as_device_ptr(), m, k, alpha, beta
+                    ))?;
+                }
+                Ok(())
+            };
+            let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+            report(&label, label_k, ms, f16_bytes, &check(&stream, &mut y_gpu, m, &y_ref_f16)?);
+        }
+
         println!();
     }
 

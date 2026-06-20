@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-blastoff = { path = "../../crates/blastoff" }
-cust = { path = "../../crates/cust" }
+blastoff = { path = "../../crates/blastoff", features = ["half"] }
+cust = { path = "../../crates/cust", features = ["impl_half"] }
 cust_raw = { path = "../../crates/cust_raw", features = ["driver"] }
 ndarray = { version = "0.16", features = ["approx"] }
 ndarray-rand = "0.15.0"
+half = "2.4.1"
 
 [build-dependencies]
 cuda_builder = { workspace = true, default-features = false, features = ["rustc_codegen_nvvm", "llvm19"] }

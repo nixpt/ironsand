@@ -775,6 +775,7 @@ dependencies = [
  "cuda_builder",
  "cust",
  "cust_raw",
+ "half",
  "ndarray",
  "ndarray-rand",
 ]
