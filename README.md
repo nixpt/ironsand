@@ -7,12 +7,22 @@
   </p>
 </div>
 
-## About
+## Purpose
 
-`ironsand` is a hard fork of [The Rust CUDA Project](https://github.com/Rust-GPU/rust-cuda)
-(`Rust-GPU/rust-cuda`), itself a reboot of the original `rust-cuda`. It carries the same core
-idea — compile Rust to PTX via a custom `rustc` codegen backend (`rustc_codegen_nvvm`) and drive
-the GPU from Rust through the `cust` family — and diverges from there on its own track.
+`ironsand` is an experimentation vehicle for the **`zorro` inference engine**. The goal is to
+explore authoring GPU kernels for LLM inference — GEMM, attention, sampling — in **Rust**, compiled
+to PTX via the `rustc_codegen_nvvm` backend, as an alternative to hand-written CUDA C++.
+
+This is a deliberately narrow scope. It is **not** a general-purpose GPU ecosystem (that is what its
+upstream is); see below.
+
+## Lineage & attribution
+
+`ironsand` is a **hard fork** of [The Rust CUDA Project](https://github.com/Rust-GPU/rust-cuda)
+(`Rust-GPU/rust-cuda`). The bulk of the code originates there and remains under its authors'
+copyright (MIT OR Apache-2.0). Upstream targets general-purpose GPU work; this fork is slimmed to
+the codegen + host stack needed for inference experiments, dropping OptiX, cuDNN, and non-inference
+examples/infra. Full details and credits in [ATTRIBUTION.md](ATTRIBUTION.md).
 
 This is an independent fork with its own history. It is **early and experimental**: expect bugs,
 safety issues, and rough edges.
