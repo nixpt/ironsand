@@ -13,10 +13,9 @@ pub const BLOCK: usize = 256;
 /// read `A` coalesced. Partial sums are combined with a shared-memory tree
 /// reduction, then thread 0 writes `y[row]`.
 ///
-/// This is the warp-shuffle reduction's portable cousin: the shuffle
-/// intrinsics currently crash libnvvm during PTX generation (see the
-/// `warp_shuffle` trap), so we reduce through shared memory — the same idiom
-/// `gemm_tiled` uses — which lowers cleanly.
+/// This is the warp-shuffle reduction's portable cousin: it needs no warp
+/// intrinsics, reducing through shared memory (the same idiom `gemm_tiled`
+/// uses). Kept alongside [`super::gemv_warp`] as a shuffle-free alternative.
 ///
 /// # Safety
 /// CUDA kernel; launch with `grid = m`, `block = BLOCK`, buffers `A=m*k`,

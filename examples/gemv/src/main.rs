@@ -124,6 +124,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, block_run)?;
         report(&label, "rust block", ms, a_bytes, &check(&stream, &mut y_gpu, m, &y_ref)?);
 
+        // --- Rust warp: warp per row, shuffle reduction -----------------------
+        let warp = module.get_function("gemv_warp")?;
+        let warp_run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32; // 8 warps per block
+            let warps_per_block = block / 32;
+            let grid = (m as u32).div_ceil(warps_per_block);
+            unsafe {
+                launch!(warp<<<grid, block, 0, stream>>>(
+                    a_gpu.as_device_ptr(), a_gpu.len(),
+                    x_gpu.as_device_ptr(), x_gpu.len(),
+                    y_gpu.as_device_ptr(), m, k, alpha, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, warp_run)?;
+        report(&label, "rust warp", ms, a_bytes, &check(&stream, &mut y_gpu, m, &y_ref)?);
+
         println!();
     }
 

@@ -759,24 +759,63 @@ unsafe fn warp_shuffle_32(
     b: u32,
     width: u32,
 ) -> (u32, bool) {
-    unsafe extern "C" {
-        // see libintrinsics.ll
-        // Returns {i32, i8} in LLVM IR, which maps to our WarpShuffleResult struct
-        fn __nvvm_warp_shuffle(mask: u32, mode: u32, a: u32, b: u32, c: u32) -> WarpShuffleResult;
+    // `c` packs the shuffle clamp (max lane = 31) and the segment mask (32 - width),
+    // mimicking nvcc's behavior.
+    let c: u32 = 0b11111 | ((32 - width) << 8);
+    let out_val: u32;
+    let out_pred: u32;
+
+    // Emitted as inline PTX rather than routed through the libintrinsics
+    // `__nvvm_warp_shuffle` wrapper. libnvvm (CUDA 13.3, compute_100 / modern
+    // dialect) SIGSEGVs while lowering a `shfl.sync` intrinsic that lives in a
+    // non-inlined callee function — and that wrapper is exactly such a function.
+    // Emitting the asm here keeps the shuffle inlined into the kernel, which
+    // lowers cleanly. (See the ironsand `warp_shuffle` dejavue trap.)
+    //
+    // `shfl.sync.MODE.b32 d|p, a, b, c, mask` returns the shuffled value plus a
+    // "source lane in range" predicate; `selp` materializes the predicate.
+    unsafe {
+        match mode {
+            WarpShuffleMode::Idx => asm!(
+                "{{",
+                ".reg .pred %p;",
+                "shfl.sync.idx.b32 {dv}|%p, {a}, {b}, {c}, {m};",
+                "selp.u32 {dp}, 1, 0, %p;",
+                "}}",
+                dv = out(reg32) out_val, dp = out(reg32) out_pred,
+                a = in(reg32) value, b = in(reg32) b, c = in(reg32) c, m = in(reg32) mask,
+            ),
+            WarpShuffleMode::Up => asm!(
+                "{{",
+                ".reg .pred %p;",
+                "shfl.sync.up.b32 {dv}|%p, {a}, {b}, {c}, {m};",
+                "selp.u32 {dp}, 1, 0, %p;",
+                "}}",
+                dv = out(reg32) out_val, dp = out(reg32) out_pred,
+                a = in(reg32) value, b = in(reg32) b, c = in(reg32) c, m = in(reg32) mask,
+            ),
+            WarpShuffleMode::Down => asm!(
+                "{{",
+                ".reg .pred %p;",
+                "shfl.sync.down.b32 {dv}|%p, {a}, {b}, {c}, {m};",
+                "selp.u32 {dp}, 1, 0, %p;",
+                "}}",
+                dv = out(reg32) out_val, dp = out(reg32) out_pred,
+                a = in(reg32) value, b = in(reg32) b, c = in(reg32) c, m = in(reg32) mask,
+            ),
+            WarpShuffleMode::Xor => asm!(
+                "{{",
+                ".reg .pred %p;",
+                "shfl.sync.bfly.b32 {dv}|%p, {a}, {b}, {c}, {m};",
+                "selp.u32 {dp}, 1, 0, %p;",
+                "}}",
+                dv = out(reg32) out_val, dp = out(reg32) out_pred,
+                a = in(reg32) value, b = in(reg32) b, c = in(reg32) c, m = in(reg32) mask,
+            ),
+        }
     }
 
-    assert!(
-        !(width & (width - 1)) != 0 && width <= 32,
-        "width must be a power of 2 and less than or equal to 32"
-    );
-
-    // mimicking nvcc's behavior
-    let mut c = 0;
-    c |= 0b11111;
-    c |= (32 - width) << 8;
-
-    let result = unsafe { __nvvm_warp_shuffle(mask, mode as u32, value, b, c) };
-    (result.value, result.predicate != 0)
+    (out_val, out_pred != 0)
 }
 
 unsafe fn warp_shuffle_128(

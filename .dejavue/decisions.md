@@ -29,3 +29,15 @@ warp_shuffle_xor crashes libnvvm (see trap). Block-per-row + shared-mem tree red
 Rejected alternatives:
 - **warp-shuffle butterfly reduction**: SIGSEGVs libnvvm during PTX gen
 
+
+## 2026-06-20T16:52:57-05:00 — [STRATEGIC] Fix warp shuffle via inline PTX asm! in cuda_std, not the libintrinsics wrapper
+
+Reason:
+libnvvm CUDA 13.3 segfaults lowering shfl.sync in a non-inlined callee (the __nvvm_warp_shuffle libintrinsics wrapper). Inline asm! in warp_shuffle_32 keeps the shuffle inside the kernel where it lowers cleanly, fixing all shuffle width variants. Supersedes the tactical shared-mem-only workaround.
+
+Supersedes: 4
+
+Rejected alternatives:
+- **always-inline pass in codegen before NVVM**: also works (verified in harness) but needs llvm-link of libintrinsics + a new-PM pass runner — bigger change than the contained cuda_std asm fix
+- **keep shared-mem reduction only**: leaves cuda_std warp shuffle broken for all users
+
