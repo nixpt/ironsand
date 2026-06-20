@@ -334,6 +334,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
         report(&label, "ternary", ms, tern_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_tern, 0.02)?);
 
+        // Optimized ternary: dp4a + branchless spread, with the Σx correction.
+        let x_sum: i32 = x_q8.iter().map(|&b| b as i8 as i32).sum();
+        let tkd = module.get_function("gemv_ternary_dp4a")?;
+        let run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32;
+            let grid = (m as u32).div_ceil(block / 32);
+            unsafe {
+                launch!(tkd<<<grid, block, 0, stream>>>(
+                    wt_gpu.as_device_ptr(), wt_gpu.len(),
+                    sw_gpu.as_device_ptr(), sw_gpu.len(),
+                    xq_gpu.as_device_ptr(), xq_gpu.len(),
+                    sx, x_sum, y_gpu.as_device_ptr(), m, k, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+        report(&label, "tern dp4a", ms, tern_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_tern, 0.02)?);
+
         println!();
     }
 

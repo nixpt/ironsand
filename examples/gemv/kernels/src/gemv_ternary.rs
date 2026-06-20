@@ -18,8 +18,36 @@
 use cuda_std::kernel;
 use cuda_std::thread;
 use cuda_std::warp;
+#[cfg(target_os = "cuda")]
+use core::arch::asm;
 
 const WARP: u32 = 32;
+
+/// `dp4a.s32.s32`: `c + Σ s8x4(a)·s8x4(b)` as i32. sm_61+.
+#[cfg(target_os = "cuda")]
+#[inline(always)]
+unsafe fn dp4a(a: u32, b: u32, c: i32) -> i32 {
+    let d: i32;
+    unsafe {
+        asm!("dp4a.s32.s32 {d}, {a}, {b}, {c};",
+            d = out(reg32) d, a = in(reg32) a, b = in(reg32) b, c = in(reg32) c)
+    };
+    d
+}
+#[cfg(not(target_os = "cuda"))]
+#[inline(always)]
+unsafe fn dp4a(_a: u32, _b: u32, _c: i32) -> i32 {
+    0
+}
+
+/// Spread 4 packed 2-bit codes (one byte: `c0|c1<<2|c2<<4|c3<<6`) into 4 byte
+/// lanes (`c0 | c1<<8 | c2<<16 | c3<<24`), each value still in `{0,1,2}`.
+/// Pure mask/shift/or — no per-byte subtract (that would borrow across bytes),
+/// so the `-1` of `signed = code-1` is deferred to a single `Σx` correction.
+#[inline(always)]
+fn spread(b: u32) -> u32 {
+    (b & 0x03) | ((b & 0x0C) << 6) | ((b & 0x30) << 12) | ((b & 0xC0) << 18)
+}
 
 #[inline(always)]
 unsafe fn warp_sum_i32(mut v: i32) -> i32 {
@@ -81,5 +109,59 @@ pub unsafe fn gemv_ternary_warp(
     if lane == 0 {
         let e = unsafe { &mut *y.add(row) };
         *e = scale_w[row] * scale_x * (isum as f32) + beta * *e;
+    }
+}
+
+/// Optimized ternary GEMV via dp4a + branchless spread.
+///
+/// Replaces the scalar 16-iteration unpack with: per packed `u32` (16 codes),
+/// [`spread`] each of the 4 bytes into 4 int8 lanes (codes `{0,1,2}`) and feed
+/// `dp4a` against the int8 activations — 4 `dp4a` per word instead of 16
+/// multiply-accumulates. The `-1` per weight is applied once at the end as
+/// `Σ_j (c_j-1)·x_j = (Σ_j c_j·x_j) - Σ_j x_j`, where `x_sum = Σ_j x_q8[j]` is a
+/// single host-provided scalar (the same for every row).
+///
+/// # Safety
+/// As [`gemv_ternary_warp`], plus `x_sum` must equal the i32 sum of `xq` (as i8).
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn gemv_ternary_dp4a(
+    w: &[u32],
+    scale_w: &[f32],
+    xq: &[u8],
+    scale_x: f32,
+    x_sum: i32,
+    y: *mut f32,
+    m: usize,
+    k: usize,
+    beta: f32,
+) {
+    let tid = thread::block_dim_x() * thread::block_idx_x() + thread::thread_idx_x();
+    let row = (tid / WARP) as usize;
+    let lane = tid % WARP;
+    if row >= m {
+        return;
+    }
+    let kw = k / 16;
+    let wrow = unsafe { w.as_ptr().add(row * kw) };
+    let x32 = xq.as_ptr() as *const u32;
+
+    let mut acc: i32 = 0;
+    let mut t = lane as usize;
+    while t < kw {
+        let packed = unsafe { *wrow.add(t) };
+        let xb = t * 4; // u32 index into the int8 activations
+        acc = unsafe { dp4a(spread(packed & 0xFF), *x32.add(xb), acc) };
+        acc = unsafe { dp4a(spread((packed >> 8) & 0xFF), *x32.add(xb + 1), acc) };
+        acc = unsafe { dp4a(spread((packed >> 16) & 0xFF), *x32.add(xb + 2), acc) };
+        acc = unsafe { dp4a(spread((packed >> 24) & 0xFF), *x32.add(xb + 3), acc) };
+        t += WARP as usize;
+    }
+
+    let isum = unsafe { warp_sum_i32(acc) };
+    if lane == 0 {
+        let inner = isum - x_sum; // Σ(c-1)·x = Σc·x − Σx
+        let e = unsafe { &mut *y.add(row) };
+        *e = scale_w[row] * scale_x * (inner as f32) + beta * *e;
     }
 }
