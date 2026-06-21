@@ -237,3 +237,92 @@ pub unsafe fn gemv_q6k_dp4a(
         *e = sum + beta * *e;
     }
 }
+
+/// Coalesced Q6_K vec_dot (mmvq-style) — W6A8.
+///
+/// Faithful port of llama.cpp `vec_dot_q6_K_q8_1_impl_mmvq`: the whole warp
+/// processes one super-block per step, lane `t` reading a **4-byte `ql` int**
+/// (consecutive lanes → consecutive bytes = COALESCED, the fix the naive
+/// [`gemv_q6k_dp4a`] lacked). Each lane's `ql` int encodes 8 weights — 4 from
+/// the low nibbles (contiguous positions `p..p+4`) and 4 from the high nibbles
+/// (`p+64..p+68`) — combined with a 4-byte `qh` int for the upper 2 bits. The
+/// matching int8 activations are contiguous → one aligned `u32` load each. The
+/// `-32` of `(q-32)` is folded via `Σ: dp4a(q,u) - 32·dp4a(u,1)` (no `vsub4`).
+///
+/// Activations are per-vector int8 (`xq`,`xscale`); `d` (super-block f16) and the
+/// int8 sub-block `scales` apply per group. Lane accumulates `d·(sc_lo·vlo +
+/// sc_hi·vhi)` across super-blocks; `xscale` multiplies the warp-reduced sum.
+///
+/// # Safety
+/// `k % 256 == 0`; `a` = `m·(k/256)` 210-byte blocks; `xq` = `k` int8; `y` = `m`.
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn gemv_q6k_vecdot(
+    a: &[u8],
+    xq: &[u8],
+    xscale: f32,
+    y: *mut f32,
+    m: usize,
+    k: usize,
+    beta: f32,
+) {
+    let tid = thread::block_dim_x() * thread::block_idx_x() + thread::thread_idx_x();
+    let row = (tid / WARP) as usize;
+    let lane = (tid % WARP) as usize;
+    if row >= m {
+        return;
+    }
+    let nb = k / 256;
+    let row_base = row * nb * BLK;
+    let aptr = a.as_ptr();
+    let x32 = xq.as_ptr() as *const u32;
+
+    let g = lane / 16; // group 0/1
+    let tg = lane % 16; // 0..15 within group
+    let j = tg * 4; // first ql byte (within group)
+    let qbit_lo = if tg < 8 { 0 } else { 2 }; // q1 vs q2 high-bit position
+    let qbit_hi = if tg < 8 { 4 } else { 6 }; // q3 vs q4
+
+    let mut acc = 0.0f32;
+    let mut b = 0usize;
+    while b < nb {
+        let bbase = row_base + b * BLK;
+        let d = unsafe { cvt_f16(load_u16(aptr, bbase + 208)) };
+
+        // 4-byte reads assembled from u16 pairs — Q6_K blocks are 210 bytes
+        // (2-aligned, not 4-aligned), so a direct u32 load would misalign.
+        let vlo16 = bbase + g * 64 + j;
+        let qho16 = bbase + 128 + g * 32 + (tg % 8) * 4;
+        let vl =
+            unsafe { (load_u16(aptr, vlo16) as u32) | ((load_u16(aptr, vlo16 + 2) as u32) << 16) };
+        let qh =
+            unsafe { (load_u16(aptr, qho16) as u32) | ((load_u16(aptr, qho16 + 2) as u32) << 16) };
+
+        // reconstruct two packs of 4 six-bit values (0..63), as 4 bytes each
+        let q_lo = (vl & 0x0F0F0F0F) | (((qh >> qbit_lo) & 0x03030303) << 4);
+        let q_hi = ((vl >> 4) & 0x0F0F0F0F) | (((qh >> qbit_hi) & 0x03030303) << 4);
+
+        // contiguous int8 activations
+        let pos_lo = b * 256 + g * 128 + j;
+        let pos_hi = pos_lo + 64;
+        let u_lo = unsafe { *x32.add(pos_lo / 4) };
+        let u_hi = unsafe { *x32.add(pos_hi / 4) };
+
+        // (q-32) dot via Σ-trick: dp4a(q,u) - 32·dp4a(u,1)
+        let ones = 0x01010101u32;
+        let vlo = unsafe { dp4a(q_lo, u_lo, 0) - 32 * dp4a(u_lo, ones, 0) };
+        let vhi = unsafe { dp4a(q_hi, u_hi, 0) - 32 * dp4a(u_hi, ones, 0) };
+
+        let sc_lo = unsafe { *aptr.add(bbase + 192 + pos_lo % 256 / 16) } as i8 as i32;
+        let sc_hi = unsafe { *aptr.add(bbase + 192 + pos_hi % 256 / 16) } as i8 as i32;
+
+        acc += d * (sc_lo * vlo + sc_hi * vhi) as f32;
+        b += 1;
+    }
+
+    let sum = unsafe { warp_sum_f32(acc) } * xscale;
+    if lane == 0 {
+        let e = unsafe { &mut *y.add(row) };
+        *e = sum + beta * *e;
+    }
+}

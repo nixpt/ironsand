@@ -27,6 +27,6 @@ pub use crate::gemv_f16::{gemv_f16_vec4, gemv_f16_warp};
 pub use crate::gemv_i8::{gemv_i8_dp4a, gemv_i8_warp};
 pub use crate::gemv_naive::gemv_naive;
 pub use crate::gemv_q4k::{gemv_q4k_fast, gemv_q4k_warp};
-pub use crate::gemv_q6k::{gemv_q6k_dp4a, gemv_q6k_warp};
+pub use crate::gemv_q6k::{gemv_q6k_dp4a, gemv_q6k_vecdot, gemv_q6k_warp};
 pub use crate::gemv_ternary::{gemv_ternary_dp4a, gemv_ternary_warp};
 pub use crate::gemv_warp::gemv_warp;

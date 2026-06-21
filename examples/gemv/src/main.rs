@@ -440,6 +440,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
         report(&label, "Q6_K W6A8", ms, q6k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k_a8, 0.03)?);
+
+        // coalesced mmvq-style vec_dot (W6A8)
+        let q6kv = module.get_function("gemv_q6k_vecdot")?;
+        let run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32;
+            let grid = (m as u32).div_ceil(block / 32);
+            unsafe {
+                launch!(q6kv<<<grid, block, 0, stream>>>(
+                    q6k_gpu.as_device_ptr(), q6k_gpu.len(),
+                    xq_gpu.as_device_ptr(), xq_gpu.len(),
+                    sx, y_gpu.as_device_ptr(), m, k, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+        report(&label, "Q6_K vecdot", ms, q6k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k_a8, 0.03)?);
         }
 
         println!();
