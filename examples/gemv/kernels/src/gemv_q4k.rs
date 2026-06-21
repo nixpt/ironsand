@@ -34,19 +34,19 @@ const MMQ_MAXK: usize = 2048;
 
 #[cfg(target_os = "cuda")]
 #[inline(always)]
-unsafe fn cvt_f16(bits: u16) -> f32 {
+pub(crate) unsafe fn cvt_f16(bits: u16) -> f32 {
     let o: f32;
     unsafe { asm!("cvt.f32.f16 {o}, {i};", o = out(reg32) o, i = in(reg16) bits) };
     o
 }
 #[cfg(not(target_os = "cuda"))]
 #[inline(always)]
-unsafe fn cvt_f16(_bits: u16) -> f32 {
+pub(crate) unsafe fn cvt_f16(_bits: u16) -> f32 {
     0.0
 }
 
 #[inline(always)]
-unsafe fn load_u16(p: *const u8, off: usize) -> u16 {
+pub(crate) unsafe fn load_u16(p: *const u8, off: usize) -> u16 {
     let lo = unsafe { *p.add(off) } as u16;
     let hi = unsafe { *p.add(off + 1) } as u16;
     lo | (hi << 8)
@@ -159,7 +159,7 @@ pub unsafe fn gemv_q4k_warp(
 ///
 /// `s0` = bytes [0..4), `s1` = bytes [4..8), `s2` = bytes [8..12). Little-endian.
 #[inline(always)]
-fn unpack_q4k_scales(s0: u32, s1: u32, s2: u32) -> ([u32; 8], [u32; 8]) {
+pub(crate) fn unpack_q4k_scales(s0: u32, s1: u32, s2: u32) -> ([u32; 8], [u32; 8]) {
     let sc = [
         s0 & 0x3F,                                  // byte0 low 6
         (s0 >> 8) & 0x3F,                           // byte1 low 6

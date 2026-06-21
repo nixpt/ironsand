@@ -193,6 +193,100 @@ fn run_q4k_mmq(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Stage-2: tensor-core Q4_K mmq GEMM (`quant_act_q8` → `gemm_q4k_mma`, f16 out)
+/// vs the f64 reference + vs the ~60 TFLOP/s cuBLAS-f16 bar.
+fn run_q4k_mma(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
+    use cust::memory::CopyDestination as _;
+    let (n, mrows, k) = (512usize, 2048usize, 2048usize);
+    let nsub = k / 32;
+
+    let w = Array2::<f32>::random((mrows, k), Uniform::new(-1.0, 1.0));
+    let (wq, w_deq) = quantize_q4k(&w, mrows, k);
+    let xa = Array2::<f32>::random((n, k), Uniform::new(-1.0, 1.0));
+    let wd = Array2::from_shape_vec((mrows, k), w_deq).unwrap().mapv(|v| v as f64);
+    let y_ref = xa.mapv(|v| v as f64).dot(&wd.t());
+
+    let wq_gpu = wq.as_slice().as_dbuf()?;
+    let x_flat: Vec<f32> = xa.as_standard_layout().iter().copied().collect();
+    let x_gpu = x_flat.as_slice().as_dbuf()?;
+    let xq_gpu = vec![0u8; n * k].as_slice().as_dbuf()?;
+    let xscale_gpu = vec![0.0f32; n].as_slice().as_dbuf()?;
+    let bsum_gpu = vec![0i32; n * nsub].as_slice().as_dbuf()?;
+    let y_gpu = vec![0u16; n * mrows].as_slice().as_dbuf()?;
+
+    let qf = module.get_function("quant_act_q8")?;
+    let gf = module.get_function("gemm_q4k_mma")?;
+
+    // Activation quant prologue (once); then time the gemm.
+    let quant = || -> Result<(), Box<dyn Error>> {
+        unsafe {
+            launch!(qf<<<n as u32, 256, 0, stream>>>(
+                x_gpu.as_device_ptr(), x_gpu.len(),
+                xq_gpu.as_device_ptr(), xscale_gpu.as_device_ptr(), bsum_gpu.as_device_ptr(),
+                n, k
+            ))?;
+        }
+        Ok(())
+    };
+    quant()?;
+    stream.synchronize()?;
+
+    let grid = ((n / 16) * (mrows / 8)) as u32;
+    let gemm = || -> Result<(), Box<dyn Error>> {
+        unsafe {
+            launch!(gf<<<grid, 32, 0, stream>>>(
+                wq_gpu.as_device_ptr(), wq_gpu.len(),
+                xq_gpu.as_device_ptr(), xq_gpu.len(),
+                xscale_gpu.as_device_ptr(), xscale_gpu.len(),
+                bsum_gpu.as_device_ptr(), bsum_gpu.len(),
+                y_gpu.as_device_ptr(), n, mrows, k
+            ))?;
+        }
+        Ok(())
+    };
+    let ms = time(stream, NUM_WARMUPS, NUM_RUNS, gemm)?;
+
+    let mut y_bits = vec![0u16; n * mrows];
+    y_gpu.copy_to(&mut y_bits)?;
+
+    let mut diff_sq = 0.0f64;
+    let mut ref_sq = 0.0f64;
+    let mut sum_sq = 0.0f64;
+    for idx in 0..n * mrows {
+        let r = y_ref[[idx / mrows, idx % mrows]];
+        sum_sq += r * r;
+    }
+    let std = (sum_sq / (n * mrows) as f64).sqrt();
+    let big_floor = 0.25 * std;
+    let mut max_rel_big = 0.0f64;
+    for idx in 0..n * mrows {
+        let r = y_ref[[idx / mrows, idx % mrows]];
+        let g = half::f16::from_bits(y_bits[idx]).to_f32() as f64;
+        let d = g - r;
+        diff_sq += d * d;
+        ref_sq += r * r;
+        if r.abs() > big_floor {
+            let rel = d.abs() / r.abs();
+            if rel > max_rel_big {
+                max_rel_big = rel;
+            }
+        }
+    }
+    let l2_rel = (diff_sq / ref_sq).sqrt();
+    let tflops = 2.0 * n as f64 * mrows as f64 * k as f64 / (ms as f64 * 1e-3) / 1e12;
+    println!(
+        "Q4K-MMA tensor-core (fused, f16 out): N={n} K={k} M={mrows}  {ms:.4} ms  {tflops:.1} TFLOP/s  (bar: cuBLAS-f16 ~60)"
+    );
+    println!("  L2-rel={l2_rel:.5}  max_rel(|y|>{big_floor:.2})={max_rel_big:.4}  (std(y)={std:.2})");
+    // f16 out adds ~5e-4 rounding on top of int8-act noise; tolerate a hair more.
+    if l2_rel < 0.025 && max_rel_big < 0.10 {
+        println!("Q4K-MMA: PASS — int8 tensor-core mmq GEMM correct.");
+    } else {
+        println!("Q4K-MMA: FAIL — L2-rel {l2_rel:.4} / max_rel_big {max_rel_big:.4} (fragment/scale bug)");
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let _ctx = cust::quick_init()?;
     let module = Module::from_ptx(PTX, &[])?;
@@ -206,6 +300,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Stage-1: fused Q4_K int8 mmq batched GEMM correctness (ZORRO_Q4K_MMQ=1).
     if std::env::var("ZORRO_Q4K_MMQ").is_ok() {
         return run_q4k_mmq(&module, &stream);
+    }
+    // Stage-2: tensor-core (mma.sync) Q4_K mmq GEMM, f16 out (ZORRO_Q4K_MMA=1).
+    if std::env::var("ZORRO_Q4K_MMA").is_ok() {
+        return run_q4k_mma(&module, &stream);
     }
 
     println!(

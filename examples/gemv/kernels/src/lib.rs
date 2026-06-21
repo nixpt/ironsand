@@ -18,6 +18,7 @@ mod gemv_f16;
 mod gemv_i8;
 mod gemv_naive;
 mod gemv_q4k;
+mod gemv_q4k_mma;
 mod gemv_q6k;
 mod gemv_ternary;
 mod gemv_warp;
@@ -30,6 +31,7 @@ pub use crate::gemv_naive::gemv_naive;
 pub use crate::gemv_q4k::{
     gemm_q4k_mmq_dp4a, gemv_q4k_fast, gemv_q4k_v3, gemv_q4k_v4, gemv_q4k_vecdot, gemv_q4k_warp,
 };
+pub use crate::gemv_q4k_mma::{gemm_q4k_mma, quant_act_q8};
 pub use crate::gemv_q6k::{gemv_q6k_dp4a, gemv_q6k_fast, gemv_q6k_vecdot, gemv_q6k_warp};
 pub use crate::gemv_ternary::{gemv_ternary_dp4a, gemv_ternary_warp};
 pub use crate::gemv_warp::gemv_warp;
