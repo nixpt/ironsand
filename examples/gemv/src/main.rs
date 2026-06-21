@@ -110,6 +110,89 @@ fn run_mma_spike(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
+/// Stage-1: fused Q4_K int8 mmq batched GEMM correctness vs an f64 reference.
+/// `Y[N×M] = X[N×K] · dequant(W)ᵀ`, W=Q4_K. Validates the fused in-kernel
+/// act-quant + dequant + `d·sc`/`dmin·mn` correction + `[N×M]` tiling. The only
+/// error vs the reference is the per-token int8 activation quant (ref uses the
+/// dequantized weights, so weight-quant error is already folded in).
+fn run_q4k_mmq(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
+    use cust::memory::CopyDestination as _;
+    let (n, mrows, k) = (512usize, 2048usize, 2048usize); // prefill: N tokens × cols × rows
+
+    let w = Array2::<f32>::random((mrows, k), Uniform::new(-1.0, 1.0));
+    let (wq, w_deq) = quantize_q4k(&w, mrows, k);
+    let xa = Array2::<f32>::random((n, k), Uniform::new(-1.0, 1.0));
+
+    // Reference Y[n×m] = X · dequant(W)ᵀ in f64.
+    let wd = Array2::from_shape_vec((mrows, k), w_deq).unwrap().mapv(|v| v as f64);
+    let y_ref = xa.mapv(|v| v as f64).dot(&wd.t());
+
+    let wq_gpu = wq.as_slice().as_dbuf()?;
+    let x_flat: Vec<f32> = xa.as_standard_layout().iter().copied().collect();
+    let x_gpu = x_flat.as_slice().as_dbuf()?;
+    let y_gpu = vec![0.0f32; n * mrows].as_slice().as_dbuf()?;
+
+    let f = module.get_function("gemm_q4k_mmq_dp4a")?;
+    let run = || -> Result<(), Box<dyn Error>> {
+        unsafe {
+            launch!(f<<<n as u32, 256, 0, stream>>>(
+                wq_gpu.as_device_ptr(), wq_gpu.len(),
+                x_gpu.as_device_ptr(), x_gpu.len(),
+                y_gpu.as_device_ptr(), n, mrows, k
+            ))?;
+        }
+        Ok(())
+    };
+    let ms = time(stream, NUM_WARMUPS, NUM_RUNS, run)?;
+
+    let mut y_out = vec![0.0f32; n * mrows];
+    y_gpu.copy_to(&mut y_out)?;
+
+    // Relative L2-norm error = the standard GEMM correctness measure. Per-element
+    // rel error explodes on near-zero (cancellation) outputs even when the kernel
+    // is exact — so judge on L2, and separately report rel error on the
+    // large-magnitude outputs (|y| > 0.25·std) where a real bug would show.
+    let mut diff_sq = 0.0f64;
+    let mut ref_sq = 0.0f64;
+    let mut sum_sq = 0.0f64;
+    for idx in 0..n * mrows {
+        let r = y_ref[[idx / mrows, idx % mrows]];
+        sum_sq += r * r;
+    }
+    let std = (sum_sq / (n * mrows) as f64).sqrt();
+    let big_floor = 0.25 * std;
+    let mut max_rel_big = 0.0f64;
+    for idx in 0..n * mrows {
+        let r = y_ref[[idx / mrows, idx % mrows]];
+        let g = y_out[idx] as f64;
+        let d = g - r;
+        diff_sq += d * d;
+        ref_sq += r * r;
+        if r.abs() > big_floor {
+            let rel = d.abs() / r.abs();
+            if rel > max_rel_big {
+                max_rel_big = rel;
+            }
+        }
+    }
+    let l2_rel = (diff_sq / ref_sq).sqrt();
+    let tflops = 2.0 * n as f64 * mrows as f64 * k as f64 / (ms as f64 * 1e-3) / 1e12;
+    println!(
+        "Q4K-MMQ dp4a (fused, per-token int8 act): N={n} K={k} M={mrows}  {ms:.3} ms  {tflops:.1} TFLOP/s",
+    );
+    println!(
+        "  L2-rel={l2_rel:.5}  max_rel(|y|>{big_floor:.2})={max_rel_big:.4}  (std(y)={std:.2})"
+    );
+    // L2-rel ~1e-2 = pure int8-act-quant noise (the math is exact); a layout/index
+    // bug would blow L2-rel to ≫0.1 and corrupt the large-magnitude outputs too.
+    if l2_rel < 0.02 && max_rel_big < 0.08 {
+        println!("Q4K-MMQ: PASS — fused int8 mmq batched GEMM correct (dp4a inner). Stage 2 = swap → mma.sync + f16 out.");
+    } else {
+        println!("Q4K-MMQ: FAIL — L2-rel {l2_rel:.4} / max_rel_big {max_rel_big:.4} (structured error, not quant noise)");
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let _ctx = cust::quick_init()?;
     let module = Module::from_ptx(PTX, &[])?;
@@ -119,6 +202,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Stage-0 spike: int8 tensor-core mma.sync go/no-go (ZORRO_MMA_SPIKE=1).
     if std::env::var("ZORRO_MMA_SPIKE").is_ok() {
         return run_mma_spike(&module, &stream);
+    }
+    // Stage-1: fused Q4_K int8 mmq batched GEMM correctness (ZORRO_Q4K_MMQ=1).
+    if std::env::var("ZORRO_Q4K_MMQ").is_ok() {
+        return run_q4k_mmq(&module, &stream);
     }
 
     println!(

@@ -15,15 +15,22 @@
 //! Layout note: this is byte-faithful to llama.cpp's `block_q4_K`
 //! (`get_scale_min_k4` + the low/high-nibble `qs` order). Requires `k % 256 == 0`.
 
+use cuda_std::address_space;
 use cuda_std::kernel;
 use cuda_std::thread;
 use cuda_std::warp;
 use cuda_std::GpuFloat;
+use core::mem::MaybeUninit;
 #[cfg(target_os = "cuda")]
 use core::arch::asm;
 
 const WARP: u32 = 32;
 const BLK: usize = 144; // bytes per Q4_K super-block
+
+/// Threads per block for the fused mmq GEMM (one block per token).
+const MMQ_BLK: usize = 256;
+/// Max K (in-features) the shared activation buffer holds. Prefill cols = 2048.
+const MMQ_MAXK: usize = 2048;
 
 #[cfg(target_os = "cuda")]
 #[inline(always)]
@@ -579,5 +586,143 @@ pub unsafe fn gemv_q4k_v4(
     if lane == 0 {
         let e = unsafe { &mut *y.add(row) };
         *e = sum + beta * *e;
+    }
+}
+
+/// Stage-1 fused Q4_K int8 mmq **batched GEMM** (dp4a inner) — the prefill lever.
+///
+/// Computes `Y[N×M] = X[N×K] · W[M×K]ᵀ` where `W` is Q4_K (resident bytes
+/// `[M·(K/256)·144]` row-major) and `X` is f32 activations `[N×K]`. This is the
+/// prefill projection (N≈512 tokens, K=cols=2048, M=rows∈{2048,8192}). It is the
+/// FUSED design both foremen require — quantize-act + integer-dot + per-sub-block
+/// `d·sc`/`dmin·mn` correction + output-scale ALL in one kernel (the unfused
+/// cuBLAS-int8 path was a measured net-slower dead-end).
+///
+/// One block per token `n`: its threads (1) reduce `amax(X[n])` → per-token int8
+/// scale, (2) quantize `X[n]` into shared `XQ` (int8), then (3) each thread sweeps
+/// output features `m`, dequant-dotting W's super-blocks against `XQ` with `dp4a`
+/// (`isum = Σ q·xq`) plus the affine min term (`asum = Σ xq`), exactly
+/// `vec_dot_q4_K_q8_1` batched over N. Output is f32 here (Stage 1 = correctness);
+/// Stage 2 swaps the dp4a inner dot for `mma.sync` int8 tensor cores + emits f16.
+///
+/// # Safety
+/// `K % 256 == 0`, `K ≤ MMQ_MAXK`; `w` = `M·(K/256)·144` bytes; `x` = `N·K` f32;
+/// `y` = `N·M` f32. Launch `<<<N, MMQ_BLK>>>`.
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn gemm_q4k_mmq_dp4a(
+    w: &[u8],
+    x: &[f32],
+    y: *mut f32,
+    n: usize,
+    mrows: usize,
+    k: usize,
+) {
+    #[address_space(shared)]
+    static mut XQ: [MaybeUninit<i8>; MMQ_MAXK] = [MaybeUninit::uninit(); MMQ_MAXK];
+    #[address_space(shared)]
+    static mut RED: [MaybeUninit<f32>; MMQ_BLK] = [MaybeUninit::uninit(); MMQ_BLK];
+    #[address_space(shared)]
+    static mut XSCALE: [MaybeUninit<f32>; 1] = [MaybeUninit::uninit(); 1];
+
+    let tok = thread::block_idx_x() as usize;
+    if tok >= n {
+        return; // uniform across the block (one block ↔ one token)
+    }
+    let tid = thread::thread_idx_x() as usize;
+    let xbase = tok * k;
+
+    // (1) per-token amax → int8 scale.
+    let mut local_max = 0.0f32;
+    let mut i = tid;
+    while i < k {
+        let v = x[xbase + i].abs();
+        if v > local_max {
+            local_max = v;
+        }
+        i += MMQ_BLK;
+    }
+    unsafe { RED[tid].write(local_max) };
+    thread::sync_threads();
+    let mut stride = MMQ_BLK / 2;
+    while stride >= 1 {
+        if tid < stride {
+            let a = unsafe { RED[tid].assume_init() };
+            let b = unsafe { RED[tid + stride].assume_init() };
+            unsafe { RED[tid].write(if a > b { a } else { b }) };
+        }
+        thread::sync_threads();
+        stride >>= 1;
+    }
+    if tid == 0 {
+        let amax = unsafe { RED[0].assume_init() };
+        unsafe { XSCALE[0].write(if amax > 0.0 { amax / 127.0 } else { 1.0 }) };
+    }
+    thread::sync_threads();
+    let xscale = unsafe { XSCALE[0].assume_init() };
+    let inv = 1.0f32 / xscale;
+
+    // (2) quantize X[tok] → shared int8.
+    let mut i = tid;
+    while i < k {
+        let q = (x[xbase + i] * inv).round();
+        let q = if q > 127.0 {
+            127.0
+        } else if q < -127.0 {
+            -127.0
+        } else {
+            q
+        };
+        unsafe { XQ[i].write(q as i32 as i8) };
+        i += MMQ_BLK;
+    }
+    thread::sync_threads();
+
+    // (3) each thread sweeps output features m, fused dequant·dot vs XQ.
+    let nb = k / 256;
+    let wptr = w.as_ptr();
+    let xqptr = core::ptr::addr_of!(XQ) as *const u8;
+    let ones = 0x01010101u32;
+    let mut m = tid;
+    while m < mrows {
+        let mut acc = 0.0f32;
+        let mut b = 0usize;
+        while b < nb {
+            let wbase = (m * nb + b) * BLK;
+            let d = unsafe { cvt_f16(load_u16(wptr, wbase)) };
+            let dmin = unsafe { cvt_f16(load_u16(wptr, wbase + 2)) };
+            let s0 = unsafe { (wptr.add(wbase + 4) as *const u32).read() };
+            let s1 = unsafe { (wptr.add(wbase + 8) as *const u32).read() };
+            let s2 = unsafe { (wptr.add(wbase + 12) as *const u32).read() };
+            let (sc, mn) = unpack_q4k_scales(s0, s1, s2);
+
+            let mut sub = 0usize;
+            while sub < 8 {
+                let g = sub >> 1;
+                let qbase = wbase + 16 + g * 32;
+                let kbase = b * 256 + sub * 32;
+                let hi = (sub & 1) == 1;
+                let mut isum = 0i32;
+                let mut asum = 0i32;
+                let mut t = 0usize;
+                while t < 8 {
+                    let raw = unsafe { (wptr.add(qbase + 4 * t) as *const u32).read() };
+                    let wq4 = if hi {
+                        (raw >> 4) & 0x0F0F0F0F
+                    } else {
+                        raw & 0x0F0F0F0F
+                    };
+                    let xq4 = unsafe { (xqptr.add(kbase + 4 * t) as *const u32).read() };
+                    isum = unsafe { dp4a(wq4, xq4, isum) };
+                    asum = unsafe { dp4a(ones, xq4, asum) };
+                    t += 1;
+                }
+                acc += d * sc[sub] as f32 * isum as f32 - dmin * mn[sub] as f32 * asum as f32;
+                sub += 1;
+            }
+            b += 1;
+        }
+        unsafe { *y.add(tok * mrows + m) = acc * xscale };
+        m += MMQ_BLK;
     }
 }
