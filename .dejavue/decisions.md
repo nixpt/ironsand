@@ -56,3 +56,34 @@ Decoding d/dmin once per 256-weight super-block (not per sub-block) gives ~1.3-2
 Rejected alternatives:
 - **lane-owns-sub-block layout**: 1.6x slower, broke nibble coalescing
 
+
+## 2026-06-20T19:20:45-05:00 — Q6_K fast (mul_add FMA + 2-way super-block unroll) gives no speedup over Q6_K warp — ~0% on 4096², slightly slower on the larger shapes
+
+Reason:
+PTX confirms warp already emits 10 fma.rn.f32 (compiler fused MUL+ADD into FMA), and the kernel is memory-bandwidth-bound at ~380 GB/s (≈21% of the 5070 Ti's 1.79 TB/s peak). Doubling FMA count via 2-way unroll just adds instructions that wait on memory; same or slightly worse wall time across all 5 bench shapes.
+
+Rejected alternatives:
+- ****FMA via mul_add****: compiler (nvvm) already fuses; no win
+- ****2-way super-block unroll****: adds ILP for the FMA pipe, but pipe isn't the bottleneck
+- ****vectorize ql/qh reads****: tried on paper but lane-owns-1-weight layout already coalesces to 1 sector; wider reads waste bandwidth
+
+
+## 2026-06-20T20:24:46-05:00 — Q4_K v3 (pair-of-sub-blocks + u32 scale reads + FMA) is 1.04-1.13x faster than Q4_K fast across all 5 bench shapes; best +13% on 12288x4096
+
+Reason:
+Three changes on top of fast, all real wins: (1) per-group outer loop reads each qs byte once instead of twice (sub=2g and sub=2g+1 share the byte; compiler likely can't CSE through runtime sub), (2) 3 u32 reads replace ~12 byte reads of the 12-byte scales array, (3) f32::mul_add FMA chains the d·nib − m expression. Q4_K is compute-bound on the affine dequant (2 mults + 1 sub per weight), so reducing instruction count helps even though the kernel isn't memory-bound at 220-270 GB/s.
+
+Rejected alternatives:
+- ****branchless nibble extract****: the (byte & 0xF) / (byte >> 4) form is already branchless; the original  was always-taken-predictable
+- ****u32 reads for qs****: lane-owns-1-weight-per-group doesn't tile to u32 reads; would require restructuring to lane-owns-4-weights which loses 4x parallelism
+
+
+## 2026-06-20T20:33:35-05:00 — Q4_K v4 (2-way super-block unroll on v3) is mixed: +2%/+9% on 4096² and 32000×4096, but -3%/-8%/-9% on the 3 mid-sized shapes
+
+Reason:
+Pattern suggests the 2× per-block live state (sc/mn arrays, d, dmin) tips the lane over the 64-register budget on the mid-sized shapes and nvvm spills to local memory. 32000×4096 has the most super-blocks per row (125 = 62 pairs) so the unroll's ILP wins offset the spill cost; 4096×11008 (43 = 21 pairs) and 12288×4096 (48 = 24 pairs) sit in the bad zone. v3 stays the default; v4 is a documented experiment.
+
+Rejected alternatives:
+- ****manual unroll of inner g loop****: g already has only 4 iterations; the compiler unrolls it
+- ****u32 reads for qs****: requires lane-restructure (8 weights/lane instead of 1) which loses 4× parallelism and needs cross-warp reduction — too big a change without a profiler
+

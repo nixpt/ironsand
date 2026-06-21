@@ -398,6 +398,40 @@ fn main() -> Result<(), Box<dyn Error>> {
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
         report(&label, "Q4_K fast", ms, q4k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?);
 
+        // optimized v3: pair-of-sub-blocks + u32 scale reads + FMA
+        let q4kv3 = module.get_function("gemv_q4k_v3")?;
+        let run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32;
+            let grid = (m as u32).div_ceil(block / 32);
+            unsafe {
+                launch!(q4kv3<<<grid, block, 0, stream>>>(
+                    q4k_gpu.as_device_ptr(), q4k_gpu.len(),
+                    x_gpu.as_device_ptr(), x_gpu.len(),
+                    y_gpu.as_device_ptr(), m, k, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+        report(&label, "Q4_K v3", ms, q4k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?);
+
+        // v4: 2-way super-block unroll on top of v3.
+        let q4kv4 = module.get_function("gemv_q4k_v4")?;
+        let run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32;
+            let grid = (m as u32).div_ceil(block / 32);
+            unsafe {
+                launch!(q4kv4<<<grid, block, 0, stream>>>(
+                    q4k_gpu.as_device_ptr(), q4k_gpu.len(),
+                    x_gpu.as_device_ptr(), x_gpu.len(),
+                    y_gpu.as_device_ptr(), m, k, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+        report(&label, "Q4_K v4", ms, q4k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?);
+
         // --- Q6_K (GGUF 6-bit k-quant, the lm_head format) ------------------
         let (q6k_blocks, a6_deq) = quantize_q6k(&a, m, k);
         let y_ref_q6k: Array1<f64> = {
@@ -422,6 +456,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
         report(&label, "Q6_K", ms, q6k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k, 0.02)?);
+
+        // Optimized Q6_K: mul_add FMA + 2-way super-block unroll.
+        let q6kf = module.get_function("gemv_q6k_fast")?;
+        let run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32;
+            let grid = (m as u32).div_ceil(block / 32);
+            unsafe {
+                launch!(q6kf<<<grid, block, 0, stream>>>(
+                    q6k_gpu.as_device_ptr(), q6k_gpu.len(),
+                    x_gpu.as_device_ptr(), x_gpu.len(),
+                    y_gpu.as_device_ptr(), m, k, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+        report(&label, "Q6_K fast", ms, q6k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k, 0.02)?);
         }
 
         println!();
