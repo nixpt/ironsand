@@ -357,10 +357,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Q4_K super-blocks are 256 weights; only applicable when k % 256 == 0.
         if k % 256 == 0 {
         let (q4k_blocks, a_deq) = quantize_q4k(&a, m, k);
-        let y_ref_q4k: Array1<f64> = {
-            let ad = ndarray::Array2::from_shape_vec((m, k), a_deq).unwrap().mapv(|v| v as f64);
-            ad.dot(&x.mapv(|v| v as f64))
-        };
+        let ad_q4k = ndarray::Array2::from_shape_vec((m, k), a_deq).unwrap().mapv(|v| v as f64);
+        let y_ref_q4k: Array1<f64> = ad_q4k.dot(&x.mapv(|v| v as f64));
+        // int8-activation reference for the W4A8 vecdot kernel (acts = sx * x_q8).
+        let x_a8_q4k: Array1<f64> = x_q8.iter().map(|&q| sx as f64 * (q as i8 as f64)).collect();
+        let y_ref_q4k_a8: Array1<f64> = ad_q4k.dot(&x_a8_q4k);
         let q4k_gpu = q4k_blocks.as_slice().as_dbuf()?;
         let q4k_bytes = (m * (k / 256) * 144) as f64; // real Q4_K storage = m*k*0.5625
         stream.synchronize()?;
@@ -431,6 +432,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
         report(&label, "Q4_K v4", ms, q4k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?);
+
+        // coalesced mmvq-style vec_dot (W4A8) — the mmvq-beating candidate
+        let q4kv = module.get_function("gemv_q4k_vecdot")?;
+        let run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32;
+            let grid = (m as u32).div_ceil(block / 32);
+            unsafe {
+                launch!(q4kv<<<grid, block, 0, stream>>>(
+                    q4k_gpu.as_device_ptr(), q4k_gpu.len(),
+                    xq_gpu.as_device_ptr(), xq_gpu.len(),
+                    sx, y_gpu.as_device_ptr(), m, k, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+        report(&label, "Q4_K vecdot", ms, q4k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k_a8, 0.03)?);
 
         // --- Q6_K (GGUF 6-bit k-quant, the lm_head format) ------------------
         let (q6k_blocks, a6_deq) = quantize_q6k(&a, m, k);

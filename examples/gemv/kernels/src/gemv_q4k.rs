@@ -243,6 +243,23 @@ pub unsafe fn gemv_q4k_fast(
     }
 }
 
+/// `dp4a.s32.s32`: `c + Σ s8x4(a)·s8x4(b)` as i32. sm_61+.
+#[cfg(target_os = "cuda")]
+#[inline(always)]
+unsafe fn dp4a(a: u32, b: u32, c: i32) -> i32 {
+    let d: i32;
+    unsafe {
+        asm!("dp4a.s32.s32 {d}, {a}, {b}, {c};",
+            d = out(reg32) d, a = in(reg32) a, b = in(reg32) b, c = in(reg32) c)
+    };
+    d
+}
+#[cfg(not(target_os = "cuda"))]
+#[inline(always)]
+unsafe fn dp4a(_a: u32, _b: u32, _c: i32) -> i32 {
+    0
+}
+
 /// Optimized Q4_K GEMV (v3): pair-of-sub-blocks loop + u32 scale reads + FMA.
 ///
 /// Three changes on top of [`gemv_q4k_fast`]:
@@ -337,6 +354,101 @@ pub unsafe fn gemv_q4k_v3(
     }
 
     let sum = unsafe { warp_sum_f32(acc) };
+    if lane == 0 {
+        let e = unsafe { &mut *y.add(row) };
+        *e = sum + beta * *e;
+    }
+}
+
+/// Coalesced Q4_K vec_dot (mmvq-style) — W4A8.
+///
+/// Faithful port of llama.cpp `vec_dot_q4_K_q8_1_impl_vmmq`, mirroring the Q6_K
+/// vecdot win. The whole warp processes one 256-weight super-block per step; the
+/// 128-byte `qs` array is read fully coalesced — lane `l` reads the aligned `u32`
+/// at `qs + l*4`, so 32 lanes cover all 128 bytes. Unlike Q6_K (210-byte blocks,
+/// 2-aligned, needing u16-pair assembly), Q4_K blocks are 144 bytes = 4-aligned,
+/// so the `u32` qs and scale loads are direct.
+///
+/// Each lane's `u32` holds 8 nibbles = 4 low-nibble weights (sub-block `2g`) and
+/// 4 high-nibble weights (sub-block `2g+1`), with `g = lane/8`. The matching int8
+/// activations are contiguous → one aligned `u32` load per sub-block. The affine
+/// dequant `w = d·sc·q - dmin·mn` splits into two integer dots per sub-block:
+///   `isum = dp4a(q, u)` → the `d·sc·Σ(q·x)` scale term, and
+///   `asum = dp4a(1, u)` → the `dmin·mn·Σ(x)` constant-min term.
+/// Lane accumulates `d·(sc·isum) - dmin·(mn·asum)` over its two sub-blocks across
+/// all super-blocks; the per-vector `xscale` multiplies the warp-reduced sum.
+/// (vs the dequant·dot [`gemv_q4k_fast`]/v3/v4 — those gather f32 acts per weight;
+/// this is the coalesced integer-dot path that beat mmvq on Q6_K.)
+///
+/// # Safety
+/// `k % 256 == 0`; `a` = `m·(k/256)` 144-byte blocks; `xq` = `k` int8; `y` = `m`.
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn gemv_q4k_vecdot(
+    a: &[u8],
+    xq: &[u8],
+    xscale: f32,
+    y: *mut f32,
+    m: usize,
+    k: usize,
+    beta: f32,
+) {
+    let tid = thread::block_dim_x() * thread::block_idx_x() + thread::thread_idx_x();
+    let row = (tid / WARP) as usize;
+    let lane = (tid % WARP) as usize;
+    if row >= m {
+        return;
+    }
+    let nb = k / 256;
+    let row_base = row * nb * BLK;
+    let aptr = a.as_ptr();
+    let x32 = xq.as_ptr() as *const u32;
+
+    let gl = lane / 8; // 64-weight group 0..3 → sub-blocks 2g (lo) + 2g+1 (hi)
+    let pl = lane % 8; // position within the group's 32 qs bytes
+    let sub_lo = 2 * gl;
+    let sub_hi = 2 * gl + 1;
+    let byteoff = pl * 4; // first qs byte this lane owns (within the 32-byte group)
+    let ones = 0x01010101u32;
+
+    let mut acc = 0.0f32;
+    let mut b = 0usize;
+    while b < nb {
+        let bbase = row_base + b * BLK;
+        let d = unsafe { cvt_f16(load_u16(aptr, bbase)) };
+        let dmin = unsafe { cvt_f16(load_u16(aptr, bbase + 2)) };
+
+        // 12 scale bytes as 3 aligned u32 (144-byte blocks are 4-aligned). Broadcast.
+        let s0 = unsafe { (aptr.add(bbase + 4) as *const u32).read() };
+        let s1 = unsafe { (aptr.add(bbase + 8) as *const u32).read() };
+        let s2 = unsafe { (aptr.add(bbase + 12) as *const u32).read() };
+        let (sc, mn) = unpack_q4k_scales(s0, s1, s2);
+
+        // Coalesced qs word: lane l reads bytes [gl*32+byteoff .. +4) of qs.
+        let qoff = bbase + 16 + gl * 32 + byteoff;
+        let qword = unsafe { (aptr.add(qoff) as *const u32).read() };
+        let q_lo = qword & 0x0F0F0F0F; // 4 low nibbles  → sub_lo
+        let q_hi = (qword >> 4) & 0x0F0F0F0F; // 4 high nibbles → sub_hi
+
+        // Contiguous int8 activations for each sub-block (aligned u32 loads).
+        let pos_lo = b * 256 + sub_lo * 32 + byteoff;
+        let pos_hi = b * 256 + sub_hi * 32 + byteoff;
+        let u_lo = unsafe { *x32.add(pos_lo / 4) };
+        let u_hi = unsafe { *x32.add(pos_hi / 4) };
+
+        // isum = Σ q·u (scale term); asum = Σ u (affine min term).
+        let isum_lo = unsafe { dp4a(q_lo, u_lo, 0) };
+        let asum_lo = unsafe { dp4a(ones, u_lo, 0) };
+        let isum_hi = unsafe { dp4a(q_hi, u_hi, 0) };
+        let asum_hi = unsafe { dp4a(ones, u_hi, 0) };
+
+        let dsum = (sc[sub_lo] as i32 * isum_lo + sc[sub_hi] as i32 * isum_hi) as f32;
+        let msum = (mn[sub_lo] as i32 * asum_lo + mn[sub_hi] as i32 * asum_hi) as f32;
+        acc += d * dsum - dmin * msum;
+        b += 1;
+    }
+
+    let sum = unsafe { warp_sum_f32(acc) } * xscale;
     if lane == 0 {
         let e = unsafe { &mut *y.add(row) };
         *e = sum + beta * *e;
