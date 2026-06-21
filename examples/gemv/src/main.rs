@@ -434,10 +434,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // --- Q6_K (GGUF 6-bit k-quant, the lm_head format) ------------------
         let (q6k_blocks, a6_deq) = quantize_q6k(&a, m, k);
-        let y_ref_q6k: Array1<f64> = {
-            let ad = ndarray::Array2::from_shape_vec((m, k), a6_deq).unwrap().mapv(|v| v as f64);
-            ad.dot(&x.mapv(|v| v as f64))
-        };
+        let a6 = ndarray::Array2::from_shape_vec((m, k), a6_deq).unwrap();
+        let y_ref_q6k: Array1<f64> = a6.mapv(|v| v as f64).dot(&x.mapv(|v| v as f64));
+        // int8-activation reference for the W6A8 kernel (acts = sx * x_q8).
+        let x_a8: Array1<f64> = x_q8.iter().map(|&q| sx as f64 * (q as i8 as f64)).collect();
+        let y_ref_q6k_a8: Array1<f64> = a6.mapv(|v| v as f64).dot(&x_a8);
         let q6k_gpu = q6k_blocks.as_slice().as_dbuf()?;
         let q6k_bytes = (m * (k / 256) * 210) as f64; // 6.5625 bits/weight
         stream.synchronize()?;
@@ -455,7 +456,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Ok(())
         };
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-        report(&label, "Q6_K", ms, q6k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k, 0.02)?);
+        report(&label, "Q6_K W6A32", ms, q6k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k, 0.02)?);
 
         // Optimized Q6_K: mul_add FMA + 2-way super-block unroll.
         let q6kf = module.get_function("gemv_q6k_fast")?;
@@ -473,6 +474,40 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
         report(&label, "Q6_K fast", ms, q6k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k, 0.02)?);
+
+        // W6A8: int8 activations + dp4a integer dot (the mmvq-style path)
+        let q6kd = module.get_function("gemv_q6k_dp4a")?;
+        let run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32;
+            let grid = (m as u32).div_ceil(block / 32);
+            unsafe {
+                launch!(q6kd<<<grid, block, 0, stream>>>(
+                    q6k_gpu.as_device_ptr(), q6k_gpu.len(),
+                    xq_gpu.as_device_ptr(), xq_gpu.len(),
+                    sx, y_gpu.as_device_ptr(), m, k, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+        report(&label, "Q6_K W6A8", ms, q6k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k_a8, 0.03)?);
+
+        // coalesced mmvq-style vec_dot (W6A8)
+        let q6kv = module.get_function("gemv_q6k_vecdot")?;
+        let run = || -> Result<(), Box<dyn Error>> {
+            let block = 256u32;
+            let grid = (m as u32).div_ceil(block / 32);
+            unsafe {
+                launch!(q6kv<<<grid, block, 0, stream>>>(
+                    q6k_gpu.as_device_ptr(), q6k_gpu.len(),
+                    xq_gpu.as_device_ptr(), xq_gpu.len(),
+                    sx, y_gpu.as_device_ptr(), m, k, beta
+                ))?;
+            }
+            Ok(())
+        };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+        report(&label, "Q6_K vecdot", ms, q6k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k_a8, 0.03)?);
         }
 
         println!();
