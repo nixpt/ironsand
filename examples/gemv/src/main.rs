@@ -39,11 +39,87 @@ const SHAPES: [(usize, usize); 6] = [
 
 static PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 
+/// Stage-0 spike: one int8 `m16n8k32` tensor-core mma tile vs a CPU int8 reference.
+/// Proves `rustc_codegen_nvvm`/LLVM19 can emit `mma.sync.*.s8` inline asm correctly.
+fn run_mma_spike(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
+    use cust::memory::CopyDestination as _;
+    const M: usize = 16;
+    const N: usize = 8;
+    const K: usize = 32;
+
+    // Deterministic int8 fill in [-3, 4] (xorshift) — small so sums stay readable.
+    let mut s: u32 = 0x1234_5678;
+    let mut nxt = || {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        ((s >> 3) & 7) as i32 as i8 - 3
+    };
+    let a: Vec<i8> = (0..M * K).map(|_| nxt()).collect();
+    let b: Vec<i8> = (0..N * K).map(|_| nxt()).collect();
+
+    // CPU reference: C[i][j] = Σ_k A[i][k] · B[j][k].
+    let mut c_ref = vec![0i32; M * N];
+    for i in 0..M {
+        for j in 0..N {
+            let mut acc = 0i32;
+            for k in 0..K {
+                acc += a[i * K + k] as i32 * b[j * K + k] as i32;
+            }
+            c_ref[i * N + j] = acc;
+        }
+    }
+
+    let a_u8: Vec<u8> = a.iter().map(|&v| v as u8).collect();
+    let b_u8: Vec<u8> = b.iter().map(|&v| v as u8).collect();
+    let a_gpu = a_u8.as_slice().as_dbuf()?;
+    let b_gpu = b_u8.as_slice().as_dbuf()?;
+    let c_gpu = vec![0i32; M * N].as_slice().as_dbuf()?;
+
+    let f = module.get_function("mma_int8_tile")?;
+    unsafe {
+        launch!(f<<<1, 32, 0, stream>>>(
+            a_gpu.as_device_ptr(), a_gpu.len(),
+            b_gpu.as_device_ptr(), b_gpu.len(),
+            c_gpu.as_device_ptr()
+        ))?;
+    }
+    stream.synchronize()?;
+
+    let mut c_out = vec![0i32; M * N];
+    c_gpu.copy_to(&mut c_out)?;
+
+    let mut bad = 0usize;
+    for i in 0..M * N {
+        if c_out[i] != c_ref[i] {
+            if bad < 8 {
+                println!("  mismatch [{},{}] gpu={} cpu={}", i / N, i % N, c_out[i], c_ref[i]);
+            }
+            bad += 1;
+        }
+    }
+    if bad == 0 {
+        println!(
+            "MMA-SPIKE: PASS — mma.sync.m16n8k32.s8 emits through nvvm/LLVM19 + correct \
+             ({M}x{N}x{K} int8 tile, all {} elems match CPU)",
+            M * N
+        );
+    } else {
+        println!("MMA-SPIKE: FAIL — {bad}/{} elems mismatch (mma emitted but wrong layout/codegen)", M * N);
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let _ctx = cust::quick_init()?;
     let module = Module::from_ptx(PTX, &[])?;
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
     let mut cublas = CublasContext::new()?;
+
+    // Stage-0 spike: int8 tensor-core mma.sync go/no-go (ZORRO_MMA_SPIKE=1).
+    if std::env::var("ZORRO_MMA_SPIKE").is_ok() {
+        return run_mma_spike(&module, &stream);
+    }
 
     println!(
         "{:>12} {:>10} {:>11} {:>11}   {:>9}",

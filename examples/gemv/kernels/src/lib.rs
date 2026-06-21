@@ -21,6 +21,7 @@ mod gemv_q4k;
 mod gemv_q6k;
 mod gemv_ternary;
 mod gemv_warp;
+mod mma_spike;
 
 pub use crate::gemv_block::gemv_block;
 pub use crate::gemv_f16::{gemv_f16_vec4, gemv_f16_warp};
@@ -32,3 +33,4 @@ pub use crate::gemv_q4k::{
 pub use crate::gemv_q6k::{gemv_q6k_dp4a, gemv_q6k_fast, gemv_q6k_vecdot, gemv_q6k_warp};
 pub use crate::gemv_ternary::{gemv_ternary_dp4a, gemv_ternary_warp};
 pub use crate::gemv_warp::gemv_warp;
+pub use crate::mma_spike::mma_int8_tile;
