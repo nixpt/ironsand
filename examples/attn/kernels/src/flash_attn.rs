@@ -317,14 +317,16 @@ pub unsafe fn flash_attn(
             unsafe { st_shared_v4(k_smem.add(row_b * DH + col_b) as u64, v4b) };
         }
         // ── Load V^T into V_T_SMEM [DH, BC] — scalar scatter (transpose on load) ──
-        // V_T_SMEM[dh, bc] = V[bc, dh]. Scalar loop; vectorized scatter to transposed
-        // layout causes 32-way smem bank conflicts (stride BC=32 bytes) — not worth it.
+        // V_T_SMEM[dh, bc] = V[bc, dh]. Scalar loop with XOR swizzle to eliminate 8-way
+        // bank conflicts. Swizzle by multiple of 8 to preserve ldmatrix alignment:
+        // bc_swizzled = bc ^ (((dh >> 3) & 1) * 8). (Phase-8, ±8 per dh level.)
         {
             let mut e = tid;
             while e < BC * DH {
                 let bc = e / DH;
                 let dh = e % DH;
-                unsafe { (*vt_smem.add(dh * BC + bc)).write(*v_head.add((kv_base + bc) * DH + dh)) };
+                let bc_swizzled = bc ^ (((dh >> 3) & 1) * 8);
+                unsafe { (*vt_smem.add(dh * BC + bc_swizzled)).write(*v_head.add((kv_base + bc) * DH + dh)) };
                 e += BLOCK_THREADS;
             }
         }
@@ -421,14 +423,16 @@ pub unsafe fn flash_attn(
         // Warp w handles V n-tiles t = [t_base, t_base + VTILES_PER_WARP).
         // o_g[tt*2+r] accumulates O[grp, dh_base+tt*8+l2*2+r]; tt = t - t_base ∈ [0,4).
         // B-fragment from V_T_SMEM [DH, BC] col-major: V_T[dh, bc] = V[bc, dh].
-        // Lane l provides column (l&7) of B sub-tile, rows start at (l&8):
-        //   vt_addr = V_T_SMEM[(t*8 + l&7)*BC + (l&8)] = V[l&8..l&8+7, t*8+l&7].
+        // Lane l provides column (l&7) of B sub-tile, rows start at (l&8), both swizzled:
+        //   vt_row = t*8 + (l&7); vt_col_swizzled = (l&8) ^ (((vt_row >> 3) & 1) * 8)
         let vtsp = addr_of!(V_T_SMEM) as *const u16;
         let vt_lane_koff = lane & 8;  // 0 for lanes 0-7, 8 for lanes 8-15
         let mut t = t_base;
         while t < t_base + VTILES_PER_WARP {
             let tt = t - t_base;
-            let vt_addr = unsafe { vtsp.add((t * 8 + (lane & 7)) * BC + vt_lane_koff) as u64 };
+            let vt_row = t * 8 + (lane & 7);
+            let vt_col_swizzled = vt_lane_koff ^ (((vt_row >> 3) & 1) * 8);
+            let vt_addr = unsafe { vtsp.add(vt_row * BC + vt_col_swizzled) as u64 };
             let [b0, b1] = unsafe { ldmatrix_b2(vt_addr) };
             let d = unsafe { mma_f16(pa, [b0, b1], [0.0f32; 4]) };
             o_g[tt * 2]      += d[0];
