@@ -54,6 +54,74 @@ pub const OP_GEMV_DECODE_SINGLE: u32 = 31;
 /// Opcode for RoleFlashAttnSingle kernel (Haiku-San dispatcher)
 pub const OP_FLASH_ATTN_SINGLE: u32 = 32;
 
+/// Launcher for RoleGEMVDecodeSingle kernel
+///
+/// # Arguments
+/// * `module` - CUDA module with compiled kernels
+/// * `stream` - CUDA stream for kernel execution
+/// * `matrix` - Input matrix [m × n] (row-major)
+/// * `vector` - Input vector [n]
+/// * `output` - Output vector [m] (allocated by caller)
+/// * `m` - Number of rows
+/// * `n` - Number of columns
+///
+/// # Performance Target
+/// - Latency: <500 μs (8192×8192)
+/// - Memory: Coalesced access (row-major layout)
+///
+/// # Example
+/// ```ignore
+/// let m = 8192;
+/// let n = 8192;
+/// let mut matrix = vec![1.0; m * n];
+/// let mut vector = vec![2.0; n];
+/// let mut output = vec![0.0; m];
+///
+/// let dev_matrix = matrix.as_slice().as_device_boxed()?;
+/// let dev_vector = vector.as_slice().as_device_boxed()?;
+/// let mut dev_output = DeviceBuffer::zeroed(m)?;
+///
+/// launch_role_gemv_decode_single(
+///     &module,
+///     &stream,
+///     &dev_matrix,
+///     &dev_vector,
+///     &mut dev_output,
+///     m as u32,
+///     n as u32,
+/// )?;
+/// ```
+pub fn launch_role_gemv_decode_single(
+    module: &Module,
+    stream: &Stream,
+    matrix: &DeviceBuffer<f32>,
+    vector: &DeviceBuffer<f32>,
+    output: &mut DeviceBuffer<f32>,
+    m: u32,
+    n: u32,
+) -> Result<(), Box<dyn Error>> {
+    let func = module.get_function("role_gemv_decode_single")?;
+
+    // Grid: m blocks (one block per output row)
+    // Block: 256 threads (each computes partial dot product)
+    const BLOCK_SIZE: u32 = 256;
+    let grid_size = m;
+
+    unsafe {
+        cust::launch!(
+            func<<<grid_size, BLOCK_SIZE, 0, stream>>>(
+                matrix.as_device_ptr(),
+                vector.as_device_ptr(),
+                output.as_device_ptr(),
+                m,
+                n,
+            )
+        )?;
+    }
+
+    Ok(())
+}
+
 /// Launcher for RoleRMSNormSingle kernel
 ///
 /// # Arguments
@@ -108,6 +176,80 @@ pub fn launch_role_rms_norm_single(
                 output.as_device_ptr(),
                 hidden_dim,
                 eps,
+            )
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Launcher for RoleFlashAttnSingle kernel
+///
+/// # Arguments
+/// * `module` - CUDA module with compiled kernels
+/// * `stream` - CUDA stream for kernel execution
+/// * `query` - Query vector [head_dim]
+/// * `k_cache` - Cached keys [seq_len × head_dim]
+/// * `v_cache` - Cached values [seq_len × head_dim]
+/// * `output` - Output vector [head_dim] (allocated by caller)
+/// * `head_dim` - Dimension of attention head
+/// * `seq_len` - Length of cached sequence
+///
+/// # Performance Target
+/// - Latency: <2000 μs (1024-token cache)
+/// - Memory: All reads from cache (no K/V computation)
+///
+/// # Example
+/// ```ignore
+/// let head_dim = 128;
+/// let seq_len = 1024;
+/// let query = vec![1.0; head_dim];
+/// let k_cache = vec![2.0; seq_len * head_dim];
+/// let v_cache = vec![3.0; seq_len * head_dim];
+/// let mut output = vec![0.0; head_dim];
+///
+/// let dev_query = query.as_slice().as_device_boxed()?;
+/// let dev_k_cache = k_cache.as_slice().as_device_boxed()?;
+/// let dev_v_cache = v_cache.as_slice().as_device_boxed()?;
+/// let mut dev_output = DeviceBuffer::zeroed(head_dim)?;
+///
+/// launch_role_flash_attn_single(
+///     &module,
+///     &stream,
+///     &dev_query,
+///     &dev_k_cache,
+///     &dev_v_cache,
+///     &mut dev_output,
+///     head_dim as u32,
+///     seq_len as u32,
+/// )?;
+/// ```
+pub fn launch_role_flash_attn_single(
+    module: &Module,
+    stream: &Stream,
+    query: &DeviceBuffer<f32>,
+    k_cache: &DeviceBuffer<f32>,
+    v_cache: &DeviceBuffer<f32>,
+    output: &mut DeviceBuffer<f32>,
+    head_dim: u32,
+    seq_len: u32,
+) -> Result<(), Box<dyn Error>> {
+    let func = module.get_function("role_flash_attn_single")?;
+
+    // Block: 32 threads (warp, good for attention operations)
+    // Grid: 1 (single query, single output)
+    const BLOCK_SIZE: u32 = 32;
+    let grid_size = 1;
+
+    unsafe {
+        cust::launch!(
+            func<<<grid_size, BLOCK_SIZE, 0, stream>>>(
+                query.as_device_ptr(),
+                k_cache.as_device_ptr(),
+                v_cache.as_device_ptr(),
+                output.as_device_ptr(),
+                head_dim,
+                seq_len,
             )
         )?;
     }
