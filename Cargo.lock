@@ -155,6 +155,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "attn"
+version = "0.1.0"
+dependencies = [
+ "cuda_builder",
+ "cust",
+ "half",
+ "ndarray",
+ "ndarray-rand",
+]
+
+[[package]]
+name = "attn-kernels"
+version = "0.1.0"
+dependencies = [
+ "cuda_std",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

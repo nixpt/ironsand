@@ -23,6 +23,8 @@ members = [
   "examples/gemm/kernels",
   "examples/gemv",
   "examples/gemv/kernels",
+  "examples/attn",
+  "examples/attn/kernels",
   "examples/vecadd",
   "examples/vecadd/kernels",
 
