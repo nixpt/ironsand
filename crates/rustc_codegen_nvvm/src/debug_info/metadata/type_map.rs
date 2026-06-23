@@ -1,10 +1,11 @@
+use std::hash::{Hash, Hasher};
+
 use std::cell::RefCell;
 
 use rustc_abi::{Align, Size, VariantIdx};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-use rustc_macros::HashStable;
 use rustc_middle::bug;
 use rustc_middle::ty::{self, ExistentialTraitRef, Ty, TyCtxt};
 
@@ -16,13 +17,12 @@ use crate::llvm;
 use crate::llvm::debuginfo::{DIFlags, DIScope, DIType};
 
 mod private {
-    use rustc_macros::HashStable;
 
     // This type cannot be constructed outside of this module because
     // it has a private field. We make use of this in order to prevent
     // `UniqueTypeId` from being constructed directly, without asserting
     // the preconditions.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, HashStable)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct HiddenZst;
 }
 
@@ -33,7 +33,7 @@ mod private {
 /// Note that there are some things that only show up in debuginfo, like
 /// the separate type descriptions for each enum variant. These get an ID
 /// too because they have their own debuginfo node in LLVM IR.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, HashStable)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum UniqueTypeId<'tcx> {
     /// The ID of a regular type as it shows up at the language level.
     Ty(Ty<'tcx>, private::HiddenZst),
@@ -102,7 +102,7 @@ impl<'tcx> UniqueTypeId<'tcx> {
     pub fn generate_unique_id_string(self, tcx: TyCtxt<'tcx>) -> String {
         let mut hasher = StableHasher::new();
         tcx.with_stable_hashing_context(|mut hcx| {
-            hcx.while_hashing_spans(false, |hcx| self.hash_stable(hcx, &mut hasher))
+            self.hash(&mut hasher)
         });
         hasher.finish::<Fingerprint>().to_hex()
     }

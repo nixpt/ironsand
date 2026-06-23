@@ -187,8 +187,8 @@ impl CodegenBackend for NvvmCodegenBackend {
         &self,
         ongoing_codegen: Box<dyn std::any::Any>,
         sess: &Session,
-        _outputs: &OutputFilenames,
-    ) -> (CompiledModules, FxIndexMap<WorkProductId, WorkProduct>) {
+        _outputs: &rustc_session::config::OutputFilenames,
+    ) -> (CompiledModules, rustc_data_structures::fx::FxIndexMap<WorkProductId, WorkProduct>) {
         debug!("Join codegen");
         let (compiled_modules, work_products) = ongoing_codegen
             .downcast::<OngoingCodegen<Self>>()
