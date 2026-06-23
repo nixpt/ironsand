@@ -152,17 +152,27 @@ fn naive_attn_cpu(
 // ── Flash attention correctness + timing ─────────────────────────────────────
 
 fn run_flash_attn(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
-    // Small shape for correctness, then a few larger ones for timing.
+    // H=1 correctness + timing.
     let shapes: &[(usize, usize)] = &[
-        (32, 32),      // smoke test
-        (64, 64),      // still fast CPU ref
-        (512, 512),    // first real shape
-        (1024, 1024),  // medium shape
-        (2048, 2048),  // near-inference scale
+        (32, 32),
+        (64, 64),
+        (512, 512),
+        (1024, 1024),
+        (2048, 2048),
     ];
-
     for &(l_seq, s_seq) in shapes {
-        run_flash_attn_shape(module, stream, l_seq, s_seq)?;
+        run_flash_attn_shape(module, stream, l_seq, s_seq, 1)?;
+    }
+
+    // Multi-head throughput (H=32, realistic transformer workload).
+    println!("\n=== Flash attention H=32 throughput ===");
+    let mh_shapes: &[(usize, usize)] = &[
+        (512, 512),
+        (1024, 1024),
+        (2048, 2048),
+    ];
+    for &(l_seq, s_seq) in mh_shapes {
+        run_flash_attn_shape(module, stream, l_seq, s_seq, 32)?;
     }
     Ok(())
 }
@@ -172,47 +182,57 @@ fn run_flash_attn_shape(
     stream: &Stream,
     l_seq: usize,
     s_seq: usize,
+    num_heads: usize,
 ) -> Result<(), Box<dyn Error>> {
     assert!(l_seq % 16 == 0 && s_seq % 16 == 0, "L and S must be multiples of 16");
 
-    // Generate f32 Q, K, V (attention-scale values: variance ~1/√Dh).
+    // Generate f32 Q, K, V for head 0 (correctness check uses H=1).
     let q_f = Array2::<f32>::random((l_seq, DH), Uniform::new(-1.0f32, 1.0));
     let k_f = Array2::<f32>::random((s_seq, DH), Uniform::new(-1.0f32, 1.0));
     let v_f = Array2::<f32>::random((s_seq, DH), Uniform::new(-0.5f32, 0.5));
 
-    // CPU reference (skip for large shapes — O(L²·Dh) is too slow beyond ~512).
+    // CPU reference (only for H=1 small shapes).
     let q_flat: Vec<f32> = q_f.as_standard_layout().iter().copied().collect();
     let k_flat: Vec<f32> = k_f.as_standard_layout().iter().copied().collect();
     let v_flat: Vec<f32> = v_f.as_standard_layout().iter().copied().collect();
-    let o_ref: Option<Vec<f32>> = if l_seq <= 512 {
+    let o_ref: Option<Vec<f32>> = if l_seq <= 512 && num_heads == 1 {
         Some(naive_attn_cpu(&q_flat, &k_flat, &v_flat, l_seq, s_seq, DH))
     } else {
         None
     };
 
-    // Convert to f16 for GPU:
+    // Convert to f16. For H>1, replicate head-0 data across all heads.
     let to_h16 = |v: &[f32]| -> Vec<u16> { v.iter().map(|&x| f16::from_f32(x).to_bits()).collect() };
-    let q_h16 = to_h16(&q_flat);
-    let k_h16 = to_h16(&k_flat);
-    let v_h16 = to_h16(&v_flat);
+    let q_h16_head0 = to_h16(&q_flat);
+    let k_h16_head0 = to_h16(&k_flat);
+    let v_h16_head0 = to_h16(&v_flat);
+
+    // [H, L/S, Dh] layout — replicate head-0 for all heads.
+    let q_h16: Vec<u16> = q_h16_head0.iter().copied().cycle().take(num_heads * l_seq * DH).collect();
+    let k_h16: Vec<u16> = k_h16_head0.iter().copied().cycle().take(num_heads * s_seq * DH).collect();
+    let v_h16: Vec<u16> = v_h16_head0.iter().copied().cycle().take(num_heads * s_seq * DH).collect();
 
     let q_gpu = q_h16.as_slice().as_dbuf()?;
     let k_gpu = k_h16.as_slice().as_dbuf()?;
     let v_gpu = v_h16.as_slice().as_dbuf()?;
-    let o_gpu = DeviceBuffer::<u16>::zeroed(l_seq * DH)?;
+    let o_gpu = DeviceBuffer::<u16>::zeroed(num_heads * l_seq * DH)?;
 
     let f = module.get_function("flash_attn")?;
-    let grid = (l_seq / 16) as u32;
+    // 2D grid: x = query tiles (L/Br), y = heads.
+    let grid_x = (l_seq / 16) as u32;
+    let grid_y = num_heads as u32;
     const BLOCK: u32 = 128; // 4 warps per block (DH-split)
 
+    let q_head_stride = l_seq * DH;
+    let kv_head_stride = s_seq * DH;
     let run = || -> Result<(), Box<dyn Error>> {
         unsafe {
-            launch!(f<<<grid, BLOCK, 0, stream>>>(
+            launch!(f<<<(grid_x, grid_y), BLOCK, 0, stream>>>(
                 q_gpu.as_device_ptr(), q_gpu.len(),
                 k_gpu.as_device_ptr(), k_gpu.len(),
                 v_gpu.as_device_ptr(), v_gpu.len(),
                 o_gpu.as_device_ptr(),
-                l_seq, s_seq
+                l_seq, s_seq, q_head_stride, kv_head_stride
             ))?;
         }
         Ok(())
@@ -227,12 +247,17 @@ fn run_flash_attn_shape(
         0.0
     };
 
-    let mut o_bits = vec![0u16; l_seq * DH];
-    o_gpu.copy_to(&mut o_bits)?;
-    let o_gpu_f: Vec<f32> = o_bits.iter().map(|&b| f16::from_bits(b).to_f32()).collect();
+    // Read back head-0 output for correctness check.
+    let mut o_bits_all = vec![0u16; num_heads * l_seq * DH];
+    o_gpu.copy_to(&mut o_bits_all)?;
+    let o_gpu_f: Vec<f32> = o_bits_all[..l_seq * DH]
+        .iter()
+        .map(|&b| f16::from_bits(b).to_f32())
+        .collect();
 
     let timing = if ms > 0.0 {
-        let flops = 4.0 * l_seq as f64 * s_seq as f64 * DH as f64; // QK^T + PV
+        // Count useful FLOPs × num_heads (QK^T + PV per head).
+        let flops = 4.0 * num_heads as f64 * l_seq as f64 * s_seq as f64 * DH as f64;
         let tflops = flops / (ms as f64 * 1e-3) / 1e12;
         format!("{ms:.3} ms  {tflops:.1} TFLOP/s")
     } else {
@@ -240,7 +265,6 @@ fn run_flash_attn_shape(
     };
 
     if let Some(ref o_ref) = o_ref {
-        // Relative L2 error vs CPU reference.
         let diff_sq: f64 = o_ref
             .iter()
             .zip(&o_gpu_f)
@@ -259,7 +283,7 @@ fn run_flash_attn_shape(
 
         let status = if l2_rel < 0.01 { "PASS" } else { "FAIL" };
         println!(
-            "FLASH-ATTN [{status}] L={l_seq} S={s_seq} Dh={DH}  \
+            "FLASH-ATTN [{status}] L={l_seq} S={s_seq} H={num_heads} Dh={DH}  \
              L2-rel={l2_rel:.2e}  max_abs(|o|>0.1)={max_abs_big:.2e}  {timing}"
         );
         if l2_rel >= 0.01 {
@@ -275,8 +299,7 @@ fn run_flash_attn_shape(
             }
         }
     } else {
-        // Large shape — no CPU reference, just report timing.
-        println!("FLASH-ATTN [TIMING] L={l_seq} S={s_seq} Dh={DH}  {timing}");
+        println!("FLASH-ATTN [TIMING] L={l_seq} S={s_seq} H={num_heads} Dh={DH}  {timing}");
     }
     Ok(())
 }

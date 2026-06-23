@@ -9,14 +9,14 @@
 //!   - **O in registers**: O_SMEM (8 KB f32) replaced by per-thread `o_g[8]`/`o_g8[8]`.
 //!     Layout: `o_g[tt*2+r]` = O[grp, dh_base+tt*8+l2*2+r] for tt=0..3, r=0..1.
 //!     Rescale/normalize/accumulate are pure register ops — no smem traffic.
-//!   - **Smem: 20 KB → 12 KB**: enables 4 blocks/SM → 16 warps/SM (50% occupancy, was 25%).
+//!   - **Smem: 20 KB → 12 KB**: enables 4 blocks/SM → 16 warps/SM (50% occ, was 25%).
 //!   - **Final write**: scattered per-thread stores (16 f16 cells/thread) replacing coalesced
-//!     smem→global pass. Worse coalescing but eliminates 8 KB smem + one sync_threads().
+//!     smem→global pass. Eliminates 8 KB smem + one sync_threads().
 //!
-//! ## Parallelism strategy (unchanged from v2/v3)
+//! ## Parallelism strategy
 //!
-//! **4 warps per block**, smem now 12 KB:
-//!   - All 4 warps compute the same S[16,16] = Q·K^T (redundant but cheap).
+//! **4 warps per block**, smem 12 KB:
+//!   - All 4 warps compute the same S[16,16] = Q·K^T (redundant but avoids S_smem).
 //!   - Warp w owns the Dh-slice [w*32, (w+1)*32) of O and 4 PV n-tiles starting at t=w*4.
 //!
 //! Occupancy: 48 KB smem / 12 KB per block = 4 blocks per SM → 16 warps per SM.
@@ -164,9 +164,14 @@ unsafe fn ldmatrix_b2(_addr: u64) -> [u32; 2] {
 
 // ── Kernel ──────────────────────────────────────────────────────────────────
 
-/// FlashAttention-2 prefill v4: 4-warp DH-split, O in per-thread registers.
-/// `O[L,Dh] = softmax(Q·K^T/√Dh)·V`. f16 in/out.
-/// Dh=128 fixed; L and S must be multiples of 16. Launch `<<<ceil(L/16), 128>>>`.
+/// FlashAttention-2 prefill v4+: 4-warp DH-split, O in per-thread registers, multi-head.
+/// `O[H,L,Dh] = softmax(Q·K^T/√Dh)·V`. f16 in/out.
+/// Dh=128, L%16==0, S%16==0. Layout: [H, L, Dh] (head-major).
+/// Launch `<<<(ceil(L/16), H), 128>>>` (2D grid over query tiles × heads).
+///
+/// q_head_stride = l_seq * Dh, kv_head_stride = s_seq * Dh (pre-computed on host).
+/// Head-specific pointers are computed once in the prologue so hot loops are identical
+/// to the single-head v4 kernel (no runtime offset in the per-tile load address chains).
 ///
 /// # Safety
 /// `L % 16 == 0`, `S % 16 == 0`, `Dh == 128`.
@@ -179,6 +184,8 @@ pub unsafe fn flash_attn(
     o: *mut u16,
     l_seq: usize,
     s_seq: usize,
+    q_head_stride: usize,
+    kv_head_stride: usize,
 ) {
     #[address_space(shared)]
     static mut Q_SMEM: [MaybeUninit<u16>; BR * DH] = [MaybeUninit::uninit(); BR * DH];
@@ -199,25 +206,32 @@ pub unsafe fn flash_attn(
     let lane       = tid % 32;   // lane within warp (0..31)
     let grp        = lane / 4;   // groupID 0..7
     let l2         = lane % 4;   // threadID-in-group 0..3
+    let h_idx      = thread::block_idx_y() as usize;  // head index
     let qi_tile    = thread::block_idx_x() as usize;
     let query_base = qi_tile * BR;
     if query_base >= l_seq {
         return;
     }
+    // Compute head-specific base pointers ONCE (prologue, not hot loops).
+    // All hot-loop address computation is then identical to single-head v4 —
+    // the compiler can precompute per-thread smem address constants as before.
+    let q_head   = unsafe { q.as_ptr().add(h_idx * q_head_stride) };
+    let k_head   = unsafe { k.as_ptr().add(h_idx * kv_head_stride) };
+    let v_head   = unsafe { v.as_ptr().add(h_idx * kv_head_stride) };
+    let o_head   = unsafe { o.add(h_idx * q_head_stride) };
 
     let scale = 1.0f32 / (DH as f32).sqrt();
 
     // Each warp owns the Dh-slice [warp_id*DH_PER_WARP, (warp_id+1)*DH_PER_WARP).
     let dh_base = warp_id * DH_PER_WARP; // 0, 32, 64, or 96
-    // PV n-tiles: warp w handles t in [warp_id*VTILES_PER_WARP, (warp_id+1)*VTILES_PER_WARP).
-    let t_base = warp_id * VTILES_PER_WARP; // 0, 4, 8, or 12
+    let t_base  = warp_id * VTILES_PER_WARP; // 0, 4, 8, or 12
 
     // ── Load Q tile (all BLOCK_THREADS cooperate, stride BLOCK_THREADS) ────────
     let mut e = tid;
     while e < BR * DH {
         let row = e / DH;
         let dh  = e % DH;
-        unsafe { (*q_smem.add(e)).write(*q.as_ptr().add((query_base + row) * DH + dh)) };
+        unsafe { (*q_smem.add(e)).write(*q_head.add((query_base + row) * DH + dh)) };
         e += BLOCK_THREADS;
     }
     thread::sync_threads();
@@ -243,14 +257,14 @@ pub unsafe fn flash_attn(
         while e < BC * DH {
             let row = e / DH;
             let dh  = e % DH;
-            unsafe { (*k_smem.add(e)).write(*k.as_ptr().add((kv_base + row) * DH + dh)) };
+            unsafe { (*k_smem.add(e)).write(*k_head.add((kv_base + row) * DH + dh)) };
             e += BLOCK_THREADS;
         }
         let mut e = tid;
         while e < BC * DH {
             let bc = e / DH;
             let dh = e % DH;
-            unsafe { (*vt_smem.add(dh * BC + bc)).write(*v.as_ptr().add((kv_base + bc) * DH + dh)) };
+            unsafe { (*vt_smem.add(dh * BC + bc)).write(*v_head.add((kv_base + bc) * DH + dh)) };
             e += BLOCK_THREADS;
         }
         thread::sync_threads();
@@ -267,8 +281,6 @@ pub unsafe fn flash_attn(
         // Precomputed per-lane constants (hoisted out of k-loop by compiler):
         //   krow0 = K row for j=0 sub-matrix (0..7); krow1 = same for j=1 (8..15).
         //   kbase = (lane&8): 0 for lanes 0-7 (matrix 0), 8 for lanes 8-15 (matrix 1).
-        // Lane l provides K_smem[krow, kb+kbase..+7] (16 bytes) for ldmatrix.x2.trans.
-        // After transpose: lane r (grp,l2) receives b0=K[krow_r, kb+kbase+l2*2..+1]. ✓
         let krow0 = lane & 7;        // 0..7
         let krow1 = krow0 + 8;      // 8..15
         let kbase = lane & 8;        // 0 or 8
@@ -276,7 +288,7 @@ pub unsafe fn flash_attn(
         let mut kk = 0usize;
         while kk < DH / 16 {
             let kb = kk * 16;
-            // A-fragment: ldmatrix.x4 from Q_smem (unchanged from v2).
+            // A-fragment: ldmatrix.x4 from Q_smem.
             let my_q_row = lane % 16;
             let my_k_off = kb + (lane / 16) * 8;
             let a_addr = unsafe { qsp_u16.add(my_q_row * DH + my_k_off) as u64 };
@@ -384,10 +396,10 @@ pub unsafe fn flash_attn(
         let dh0 = dh_base + tt * 8 + l2 * 2;
         let dh1 = dh0 + 1;
         unsafe {
-            *o.add(out_base + grp * DH + dh0)       = cvt_f32_f16(o_g[tt * 2]);
-            *o.add(out_base + grp * DH + dh1)       = cvt_f32_f16(o_g[tt * 2 + 1]);
-            *o.add(out_base + (grp + 8) * DH + dh0) = cvt_f32_f16(o_g8[tt * 2]);
-            *o.add(out_base + (grp + 8) * DH + dh1) = cvt_f32_f16(o_g8[tt * 2 + 1]);
+            *o_head.add(out_base + grp * DH + dh0)       = cvt_f32_f16(o_g[tt * 2]);
+            *o_head.add(out_base + grp * DH + dh1)       = cvt_f32_f16(o_g[tt * 2 + 1]);
+            *o_head.add(out_base + (grp + 8) * DH + dh0) = cvt_f32_f16(o_g8[tt * 2]);
+            *o_head.add(out_base + (grp + 8) * DH + dh1) = cvt_f32_f16(o_g8[tt * 2 + 1]);
         }
         tt += 1;
     }
