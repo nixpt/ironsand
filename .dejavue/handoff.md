@@ -42,18 +42,26 @@ H=32: ~5.6 TFLOP/s (was 4.1 TFLOP/s for H=1 in v4 due to L2 cache benefit).
 - ld_global_v4 / st_shared_v4: require 16-byte aligned addresses. Q/K tiles have this
   because BR=BC=16, DH=128 → row stride = 256 bytes, all 8-u16 chunks are 16-byte aligned.
 
-## v7: Final stable release (6.4 TFLOP/s H=32)
+## v7: Final stable release (6.4 TFLOP/s H=32, +55% vs v4 baseline)
 
 ## Attempted next steps
 
-**Br=32 (8 warps)** — TESTED, CORRECTNESS BROKEN (L2-rel~0.95). Root cause: All 8 warps
-independently compute & apply softmax over the same attention scores. Since each warp's
-m_g/l_g diverges (shfl_xor is per-warp), P values differ per-warp, producing inconsistent
-output. Simple fix would require cross-warp reduction on softmax state (not available).
+**Br=32 (8 warps)** — TESTED, CORRECTNESS BROKEN (L2-rel~0.95, 13.3 TFLOP/s). Root cause:
+All 8 warps independently compute & apply softmax over the same attention scores. Each
+warp's m_g/l_g diverges because `group_max` and `group_sum` are intra-warp (4-thread groups
+within a 32-thread warp). With 8 independent warps, 8 different P matrices are produced
+(P = softmax(S)), causing severe correctness loss despite 2x throughput gain.
 
-Fix requires **warp-specialized QK^T**: 2 warps compute S, apply softmax to smem, then all
-warps read P and compute PV. Avoids softmax divergence but adds complexity (barriers,
-smem coordination, async across warp groups). Estimated ~20-30% harder to implement correctly.
+**Fix path (warp-specialized softmax)**: 
+1. All 8 warps compute S[32,16] (redundant, but stays in registers).
+2. Each warp writes local m/l to smem.
+3. Sync threads; warp 0 reduces [m0..m7, l0..l7] → global [m, l], writes to smem.
+4. Sync threads; all warps read global m/l, re-compute P consistently.
+5. All warps compute PV using consistent P.
+
+Requires: cross-warp reduction (complex), shared memory coordination, extra sync points.
+Estimated complexity: +50% lines of code, risk of introducing new bugs. **Not pursued
+due to implementation risk vs marginal gain** (13.3 vs 6.4 TFLOP/s, but broken).
 
 **cp.async pipelining** — TESTED, NOT BENEFICIAL. K/V loads are not the bottleneck.
 FlashAttention's tight load→compute pattern already has good smem locality. Adding async K
