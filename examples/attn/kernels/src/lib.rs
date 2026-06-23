@@ -11,7 +11,9 @@
 mod flash_attn;
 mod flash_attn_gqa;
 mod mma_f16;
+mod stream_kernel;
 
 pub use crate::flash_attn::flash_attn;
 pub use crate::flash_attn_gqa::flash_attn_gqa;
 pub use crate::mma_f16::mma_f16_tile;
+pub use crate::stream_kernel::{stream_kernel, StreamOp, StreamQueue};
