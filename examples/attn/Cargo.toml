@@ -5,9 +5,11 @@ edition = "2024"
 
 [dependencies]
 cust = { path = "../../crates/cust", features = ["impl_half"] }
+haiku_san = { path = "../../crates/haiku_san" }
 ndarray = { version = "0.16" }
 ndarray-rand = "0.15.0"
 half = "2.4.1"
+log = "0.4"
 
 [build-dependencies]
 cuda_builder = { workspace = true, default-features = false, features = ["rustc_codegen_nvvm", "llvm19"] }

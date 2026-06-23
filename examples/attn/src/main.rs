@@ -1,7 +1,5 @@
 //! Attention kernel tests: f16 mma.sync + FlashAttention-2 + Stream kernel + Haiku-San orchestrator.
 
-mod haiku_san;
-
 use std::error::Error;
 
 use cust::event::{Event, EventFlags};
@@ -11,6 +9,7 @@ use cust::module::Module;
 use cust::stream::{Stream, StreamFlags};
 use cust::util::SliceExt as _;
 use half::f16;
+use haiku_san::HaikuSan;
 use ndarray::Array2;
 use ndarray_rand::RandomExt as _;
 use ndarray_rand::rand_distr::Uniform;
