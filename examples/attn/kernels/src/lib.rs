@@ -9,7 +9,9 @@
 #![cfg_attr(target_os = "cuda", feature(asm_experimental_arch))]
 
 mod flash_attn;
+mod flash_attn_gqa;
 mod mma_f16;
 
 pub use crate::flash_attn::flash_attn;
+pub use crate::flash_attn_gqa::flash_attn_gqa;
 pub use crate::mma_f16::mma_f16_tile;

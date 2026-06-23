@@ -304,6 +304,113 @@ fn run_flash_attn_shape(
     Ok(())
 }
 
+// ── GQA (Grouped-Query Attention) correctness ────────────────────────────────
+
+fn run_flash_attn_gqa(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
+    println!("=== GQA correctness (H=12 Q-heads, G=4 KV-heads) ===");
+
+    let l_seq = 64;
+    let s_seq = 64;
+    let num_query_heads = 12;
+    let num_kv_heads = 4;
+
+    assert!(l_seq % 16 == 0 && s_seq % 16 == 0);
+
+    // Generate separate Q, K, V with correct head dimensions
+    let q_f = Array2::<f32>::random((num_query_heads * l_seq, DH), Uniform::new(-1.0f32, 1.0));
+    let k_f = Array2::<f32>::random((num_kv_heads * s_seq, DH), Uniform::new(-1.0f32, 1.0));
+    let v_f = Array2::<f32>::random((num_kv_heads * s_seq, DH), Uniform::new(-0.5f32, 0.5));
+
+    // CPU reference for GQA
+    let q_flat: Vec<f32> = q_f.as_standard_layout().iter().copied().collect();
+    let k_flat: Vec<f32> = k_f.as_standard_layout().iter().copied().collect();
+    let v_flat: Vec<f32> = v_f.as_standard_layout().iter().copied().collect();
+
+    let o_ref = {
+        let scale = 1.0 / (DH as f32).sqrt();
+        let mut o = vec![0.0f32; num_query_heads * l_seq * DH];
+        for q_head in 0..num_query_heads {
+            let kv_head = q_head * num_kv_heads / num_query_heads; // GQA mapping
+            for i in 0..l_seq {
+                let mut scores = vec![0.0f32; s_seq];
+                for j in 0..s_seq {
+                    let mut dot = 0.0f32;
+                    for d in 0..DH {
+                        dot += q_flat[q_head * l_seq * DH + i * DH + d]
+                            * k_flat[kv_head * s_seq * DH + j * DH + d];
+                    }
+                    scores[j] = dot * scale;
+                }
+                let max_s = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let sum_e: f32 = scores.iter().map(|&v| (v - max_s).exp()).sum();
+                let probs: Vec<f32> = scores.iter().map(|&v| (v - max_s).exp() / sum_e).collect();
+                for d in 0..DH {
+                    let mut acc = 0.0f32;
+                    for j in 0..s_seq {
+                        acc += probs[j] * v_flat[kv_head * s_seq * DH + j * DH + d];
+                    }
+                    o[q_head * l_seq * DH + i * DH + d] = acc;
+                }
+            }
+        }
+        o
+    };
+
+    let to_h16 = |v: &[f32]| -> Vec<u16> { v.iter().map(|&x| f16::from_f32(x).to_bits()).collect() };
+    let q_h16 = to_h16(&q_flat);
+    let k_h16 = to_h16(&k_flat);
+    let v_h16 = to_h16(&v_flat);
+
+    let q_gpu = q_h16.as_slice().as_dbuf()?;
+    let k_gpu = k_h16.as_slice().as_dbuf()?;
+    let v_gpu = v_h16.as_slice().as_dbuf()?;
+    let o_gpu = DeviceBuffer::<u16>::zeroed(num_query_heads * l_seq * DH)?;
+
+    let f = module.get_function("flash_attn_gqa")?;
+    let grid_x = (l_seq / 16) as u32;
+    let grid_y = num_query_heads as u32;
+    const BLOCK: u32 = 128;
+
+    unsafe {
+        launch!(f<<<(grid_x, grid_y), BLOCK, 0, stream>>>(
+            q_gpu.as_device_ptr(), q_gpu.len(),
+            k_gpu.as_device_ptr(), k_gpu.len(),
+            v_gpu.as_device_ptr(), v_gpu.len(),
+            o_gpu.as_device_ptr(),
+            l_seq, s_seq,
+            num_query_heads,
+            num_kv_heads
+        ))?;
+    }
+    stream.synchronize()?;
+
+    let mut o_out = vec![0u16; num_query_heads * l_seq * DH];
+    o_gpu.copy_to(&mut o_out)?;
+
+    let o_gpu_f32: Vec<f32> = o_out.iter().map(|&x| f16::from_bits(x).to_f32()).collect();
+    let mut bad = 0usize;
+    let mut max_err = 0.0f32;
+    for i in 0..num_query_heads * l_seq * DH {
+        let err = (o_gpu_f32[i] - o_ref[i]).abs() / (o_ref[i].abs().max(1.0));
+        max_err = max_err.max(err);
+        if err > 0.01 {
+            if bad < 4 {
+                println!("  mismatch [{}] ref={} gpu={}", i, o_ref[i], o_gpu_f32[i]);
+            }
+            bad += 1;
+        }
+    }
+
+    if bad == 0 {
+        println!("GQA [PASS] H={} G={} L={} S={} rel_err={:.2e}",
+            num_query_heads, num_kv_heads, l_seq, s_seq, max_err);
+    } else {
+        println!("GQA [FAIL] {bad} mismatches");
+    }
+
+    Ok(())
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -316,6 +423,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("\n=== Flash attention correctness ===");
     run_flash_attn(&module, &stream)?;
+
+    println!("\n=== GQA correctness ===");
+    run_flash_attn_gqa(&module, &stream)?;
 
     Ok(())
 }
