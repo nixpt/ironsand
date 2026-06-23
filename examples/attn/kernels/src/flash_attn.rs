@@ -1,31 +1,32 @@
-//! FlashAttention-2-style prefill v2: 4-warp DH-split + ldmatrix for Q + register-packed P.
+//! FlashAttention-2-style prefill v3: ldmatrix for Q+K+VT B-fragments.
 //!
 //! `O[L, Dh] = softmax(Q[L,Dh] · K[S,Dh]^T / √Dh) · V[S, Dh]`
 //!
 //! Fixed: Dh=128, Br=16 (query rows/block), Bc=16 (KV columns/step). 4 warps per block.
 //! Grid: `(⌈L/16⌉,)` blocks × 128 threads. L and S must be multiples of 16.
 //!
-//! ## Parallelism strategy
+//! ## v3 over v2
+//!   - **QK^T B**: ldmatrix.x2.trans per k-step (2 calls) replaces 4 scalar ld_f16x2 loads.
+//!     n-tile j=0 (KV rows 0-7): `addr = K_smem[(lane&7)*DH + kb + (lane&8)]`
+//!     n-tile j=1 (KV rows 8-15): row offset +8.
+//!   - **PV B**: ldmatrix.x2 per n-tile replaces 2 scalar ld_f16x2 loads.
+//!     `addr = V_T_smem[(t*8 + (lane&7))*BC + (lane&8)]`
+//!   - Branchless address formulas — `lane&7` selects sub-matrix row, `lane&8` selects k-half.
 //!
-//! **4 warps per block** with identical smem layout (still 20 KB — same as v0):
+//! ## Parallelism strategy (unchanged from v2)
+//!
+//! **4 warps per block** with identical smem layout (20 KB):
 //!   - All 4 warps compute the same S[16,16] = Q·K^T (redundant but cheap).
 //!   - Warp w owns the Dh-slice [w*32, (w+1)*32) of O and 4 PV n-tiles starting at t=w*4.
-//!   - No inter-warp communication needed for QK^T/softmax (all produce identical results).
 //!   - Race-free O_smem: each warp writes disjoint Dh cells.
 //!
-//! Occupancy improvement: 48 KB smem / 20 KB per block = 2 blocks per SM → 8 warps per SM
-//! vs 1 in v0. Better latency hiding for K/V global loads.
-//!
-//! ## v1 → v2 carry-overs
-//!   - ldmatrix.sync.aligned.x4.m8n8.shared.b16 for Q A-fragment (still present).
-//!   - P packed directly from softmax registers into A-fragment u32s (no P_SMEM).
-//!   - K/V loaded cooperatively by all 128 threads (stride 128, 16 loads/thread vs 64).
+//! Occupancy: 48 KB smem / 20 KB per block = 2 blocks per SM → 8 warps per SM.
 //!
 //! ## Fragment layout (Ampere+, grp=lane/4, l2=lane%4, warp_id=tid/32)
-//! QK^T A: ldmatrix→[a0..a3] from Q_smem[l%16, kb+(l/16)*8].
-//! QK^T B: scalar ld_f16x2 from K_smem[grp*DH+…].
+//! QK^T A: ldmatrix.x4 → [a0..a3] from Q_smem[l%16, kb+(l/16)*8].
+//! QK^T B: ldmatrix.x2.trans (×2/k-step) from K_smem row-major.
 //! PV A: register-packed P values.
-//! PV B: scalar ld_f16x2 from V_T_smem[(t*8+grp)*BC+…], t in [warp_id*4, warp_id*4+4).
+//! PV B: ldmatrix.x2 (×1/n-tile) from V_T_smem col-major B layout.
 
 use core::mem::MaybeUninit;
 use core::ptr::{addr_of, addr_of_mut};
@@ -106,17 +107,6 @@ unsafe fn group_sum(mut v: f32) -> f32 {
     v
 }
 
-/// Load 2 packed f16 (u32) from raw u16 pointer at offset `idx`.
-#[cfg(target_os = "cuda")]
-#[inline(always)]
-unsafe fn ld_f16x2(p: *const u16, idx: usize) -> u32 {
-    unsafe { (p.add(idx) as *const u32).read() }
-}
-#[cfg(not(target_os = "cuda"))]
-#[inline(always)]
-unsafe fn ld_f16x2(_p: *const u16, _idx: usize) -> u32 {
-    0
-}
 
 /// Cooperative warp load of 4×(m8n8) f16 submatrices from shared memory into A-fragment regs.
 ///
@@ -143,6 +133,34 @@ unsafe fn ldmatrix_a4(addr: u64) -> [u32; 4] {
 #[inline(always)]
 unsafe fn ldmatrix_a4(_addr: u64) -> [u32; 4] {
     [0; 4]
+}
+
+/// Cooperative warp load of 2×(m8n8) f16 submatrices from shared memory, **no transpose**.
+/// Works for both K and V_T B-fragments — source is row-major in both cases.
+///
+/// For K B-fragment (n-tile j=0): lane l provides K_smem[(l&7)*DH + kb + (l&8)].
+///   After ldmatrix: thread (grp,l2) gets b0=K[grp, kb+l2*2..+1], b1=K[grp, kb+8+l2*2..+1].
+/// For K B-fragment (n-tile j=1): lane l provides K_smem[((l&7)+8)*DH + kb + (l&8)].
+/// For V_T B-fragment: lane l provides V_T_smem[(t*8+(l&7))*BC + (l&8)].
+/// Lanes 16-31 are ignored by the hardware (provide any valid smem pointer).
+#[cfg(target_os = "cuda")]
+#[inline(always)]
+unsafe fn ldmatrix_b2(addr: u64) -> [u32; 2] {
+    let (mut b0, mut b1): (u32, u32);
+    unsafe {
+        asm!(
+            "ldmatrix.sync.aligned.x2.m8n8.shared.b16 {{{0},{1}}}, [{2}];",
+            out(reg32) b0,
+            out(reg32) b1,
+            in(reg64) addr,
+        );
+    }
+    [b0, b1]
+}
+#[cfg(not(target_os = "cuda"))]
+#[inline(always)]
+unsafe fn ldmatrix_b2(_addr: u64) -> [u32; 2] {
+    [0; 2]
 }
 
 // ── Kernel ──────────────────────────────────────────────────────────────────
@@ -243,20 +261,28 @@ pub unsafe fn flash_attn(
         let mut s_j0 = [0.0f32; 4]; // n-tile j=0: KV rows 0-7
         let mut s_j1 = [0.0f32; 4]; // n-tile j=1: KV rows 8-15
 
+        // Precomputed per-lane constants (hoisted out of k-loop by compiler):
+        //   krow0 = K row for j=0 sub-matrix (0..7); krow1 = same for j=1 (8..15).
+        //   kbase = (lane&8): 0 for lanes 0-7 (matrix 0), 8 for lanes 8-15 (matrix 1).
+        // Lane l provides K_smem[krow, kb+kbase..+7] (16 bytes) for ldmatrix.x2.trans.
+        // After transpose: lane r (grp,l2) receives b0=K[krow_r, kb+kbase+l2*2..+1]. ✓
+        let krow0 = lane & 7;        // 0..7
+        let krow1 = krow0 + 8;      // 8..15
+        let kbase = lane & 8;        // 0 or 8
+
         let mut kk = 0usize;
         while kk < DH / 16 {
             let kb = kk * 16;
-            // ldmatrix: lane l provides Q_smem[l%16, kb + (l/16)*8].
+            // A-fragment: ldmatrix.x4 from Q_smem (unchanged from v2).
             let my_q_row = lane % 16;
             let my_k_off = kb + (lane / 16) * 8;
             let a_addr = unsafe { qsp_u16.add(my_q_row * DH + my_k_off) as u64 };
             let a = unsafe { ldmatrix_a4(a_addr) };
 
-            let b0j0 = unsafe { ld_f16x2(ksp, grp * DH + kb + l2 * 2) };
-            let b1j0 = unsafe { ld_f16x2(ksp, grp * DH + kb + l2 * 2 + 8) };
+            // B-fragments: 2 × ldmatrix.x2.trans (replaces 4 scalar ld_f16x2).
+            let [b0j0, b1j0] = unsafe { ldmatrix_b2(ksp.add(krow0 * DH + kb + kbase) as u64) };
             s_j0 = unsafe { mma_f16(a, [b0j0, b1j0], s_j0) };
-            let b0j1 = unsafe { ld_f16x2(ksp, (grp + 8) * DH + kb + l2 * 2) };
-            let b1j1 = unsafe { ld_f16x2(ksp, (grp + 8) * DH + kb + l2 * 2 + 8) };
+            let [b0j1, b1j1] = unsafe { ldmatrix_b2(ksp.add(krow1 * DH + kb + kbase) as u64) };
             s_j1 = unsafe { mma_f16(a, [b0j1, b1j1], s_j1) };
             kk += 1;
         }
@@ -327,11 +353,17 @@ pub unsafe fn flash_attn(
 
         // Warp w handles V_T n-tiles t = [t_base, t_base + VTILES_PER_WARP).
         // O addresses for warp w: O_smem[grp*DH + t*8 + l2*2..] ∈ [dh_base, dh_base+32). ✓
+        // B-fragment from V_T_smem [DH, BC] using ldmatrix.x2 (no transpose — already col-major).
+        // Lane l provides V_T_smem[(t*8 + (l&7))*BC + (l&8)]:
+        //   lanes 0-7  → matrix 0 row (l&7) = V_T[t*8+l, 0..7]    (k=0..7)
+        //   lanes 8-15 → matrix 1 row (l&7) = V_T[t*8+(l-8), 8..15] (k=8..15)
+        //   lanes 16-31 → ignored (addr still valid: same rows, don't care half)
         let vtsp = addr_of!(V_T_SMEM) as *const u16;
+        let vt_lane_koff = lane & 8;  // 0 or 8 — selects k-half, constant per lane
         let mut t = t_base;
         while t < t_base + VTILES_PER_WARP {
-            let b0 = unsafe { ld_f16x2(vtsp, (t * 8 + grp) * BC + l2 * 2) };
-            let b1 = unsafe { ld_f16x2(vtsp, (t * 8 + grp) * BC + l2 * 2 + 8) };
+            let vt_addr = unsafe { vtsp.add((t * 8 + (lane & 7)) * BC + vt_lane_koff) as u64 };
+            let [b0, b1] = unsafe { ldmatrix_b2(vt_addr) };
             let d = unsafe { mma_f16(pa, [b0, b1], [0.0f32; 4]) };
             unsafe {
                 let ov = (*o_smem.add(grp * DH + t * 8 + l2 * 2)).assume_init();

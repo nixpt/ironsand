@@ -87,3 +87,15 @@ Rejected alternatives:
 - ****manual unroll of inner g loop****: g already has only 4 iterations; the compiler unrolls it
 - ****u32 reads for qs****: requires lane-restructure (8 weights/lane instead of 1) which loses 4× parallelism and needs cross-warp reduction — too big a change without a profiler
 
+
+## 2026-06-22T20:20:37-05:00 — f16 mma.sync m16n8k16 proven via inline asm
+
+Reason:
+Needed for flash-attention prefill QK^T and PV GEMMs. Same asm! pattern as int8 mma (8b3cfe7); A frag a0=Q_smem[grp*DH+l2*2], B frag b0=K_smem[grp*DH+kbase+l2*2] for K^T. All 128 spike outputs match CPU.
+
+
+## 2026-06-22T20:20:37-05:00 — Flash attn v0 baseline: 0.5 TFLOP/s at 512x512 Dh=128
+
+Reason:
+First correct flash-attn in Rust→PTX. 1 warp/block, online softmax (group shfl XOR 1+2), V transposed to smem. L2-rel=3.5e-4 (f16 noise). Next: ldmatrix + multi-warp for real throughput.
+
