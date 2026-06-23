@@ -56,9 +56,20 @@
 2. **Sparse attention is intricate** — Per-element masking in FlashAttention's MMA layout requires care with thread-to-index mapping
 3. **Head mapping is cheap** — The `query_head → kv_head` computation is a single integer division, negligible overhead
 
-## Measurements TODO
+## Test Results
 
-- [ ] GQA H=12 G=4 vs standard H=12 (same total heads, reduced KV)
-- [ ] GQA H=32 G=8 vs standard H=32
-- [ ] MQA H=32 G=1 vs GQA
-- [ ] Profile: is improvement purely from reduced memory, or does cache line efficiency matter?
+**GQA v1**:
+- ✓ H=12 query heads, G=4 KV heads: rel_err=7.88e-5
+- ✓ Kernel stable, grid launch (query_tiles, query_heads) working as designed
+
+**MQA v1**:
+- ✓ H=32 query heads, G=1 KV head: rel_err=7.58e-5
+- ✓ Extreme head ratio (32:1) validated; same kernel infrastructure
+
+## Performance characterization (TODO)
+
+- [ ] GQA H=32→8 vs standard H=32 speedup on 512×512
+- [ ] MQA H=32→1 vs standard H=32 speedup on 512×512
+- [ ] Multi-size benchmark (256, 512, 1024) to isolate memory vs compute gains
+- [ ] Profile: K/V memory reduction efficiency vs standard attention
+- Note: Full benchmark requires careful setup to avoid GPU memory bottlenecks in test harness
