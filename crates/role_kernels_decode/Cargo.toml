@@ -8,7 +8,7 @@ description = "Decode-phase optimized GPU kernels for Haiku-San orchestrator"
 
 [dependencies]
 cust = { path = "../cust", default-features = false, features = ["impl_half"] }
-haiku_san = { path = "../haiku_san" }
+haiku_san = { path = "../../../haiku-san" }
 log = "0.4"
 
 [dev-dependencies]

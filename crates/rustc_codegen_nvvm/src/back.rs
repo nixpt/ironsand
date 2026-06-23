@@ -16,7 +16,7 @@ use rustc_data_structures::profiling::SelfProfilerRef;
 use rustc_errors::{DiagCtxt, DiagCtxtHandle, FatalError};
 use rustc_fs_util::path_to_c_string;
 use rustc_middle::bug;
-use rustc_middle::mir::mono::{MonoItem, MonoItemData};
+use rustc_middle::mono::{MonoItem, MonoItemData};
 use rustc_middle::{dep_graph, ty::TyCtxt};
 use rustc_session::Session;
 use rustc_session::config::{self, DebugInfo, OutputType};
@@ -184,9 +184,7 @@ pub(crate) unsafe fn codegen(
 
     let out = cgcx.output_filenames.temp_path_for_cgu(
         OutputType::Object,
-        module_name,
-        cgcx.invocation_temp.as_deref(),
-    );
+        module_name);
 
     // nvvm ir *is* llvm ir so emit_ir fits the expectation of llvm ir which is why we
     // implement this. this is copy and pasted straight from rustc_codegen_llvm
@@ -196,9 +194,7 @@ pub(crate) unsafe fn codegen(
             prof.generic_activity_with_arg("NVVM_module_codegen_emit_ir", &module.name[..]);
         let out = cgcx.output_filenames.temp_path_for_cgu(
             OutputType::LlvmAssembly,
-            module_name,
-            cgcx.invocation_temp.as_deref(),
-        );
+            module_name);
         let out = out.to_str().unwrap();
 
         let result = unsafe {

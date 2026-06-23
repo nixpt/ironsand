@@ -8,7 +8,7 @@ use crate::ty::LayoutLlvmExt;
 use rustc_codegen_ssa::traits::*;
 use rustc_hir::attrs::Linkage;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
-use rustc_middle::mir::mono::Visibility;
+use rustc_middle::mono::Visibility;
 use rustc_middle::ty::TypeVisitableExt;
 use rustc_middle::ty::layout::{FnAbiOf, HasTypingEnv, LayoutOf};
 use rustc_middle::ty::{self, Instance};

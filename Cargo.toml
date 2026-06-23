@@ -13,7 +13,6 @@ members = [
   "crates/cust_derive",
   "crates/cust_raw",
   "crates/gpu_rand",
-  "crates/haiku_san",
   "crates/role_kernels_decode",
   "crates/role_kernels_decode/kernels",
   "crates/nvvm",

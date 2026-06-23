@@ -3,10 +3,9 @@ use std::cell::RefCell;
 use rustc_abi::{Align, Size, VariantIdx};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-use rustc_macros::HashStable;
+use rustc_data_structures::stable_hash::{StableHash, StableHasher};
 use rustc_middle::bug;
-use rustc_middle::ty::{self, ExistentialTraitRef, Ty, TyCtxt};
+use rustc_middle::ty::{self, ExistentialTraitRef, Ty, TyCtxt, Unnormalized};
 
 use super::{DefinitionLocation, SmallVec, UNKNOWN_LINE_NUMBER, unknown_file_metadata};
 use crate::common::AsCCharPtr;
@@ -16,13 +15,12 @@ use crate::llvm;
 use crate::llvm::debuginfo::{DIFlags, DIScope, DIType};
 
 mod private {
-    use rustc_macros::HashStable;
 
     // This type cannot be constructed outside of this module because
     // it has a private field. We make use of this in order to prevent
     // `UniqueTypeId` from being constructed directly, without asserting
     // the preconditions.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, HashStable)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, StableHash)]
     pub struct HiddenZst;
 }
 
@@ -33,7 +31,7 @@ mod private {
 /// Note that there are some things that only show up in debuginfo, like
 /// the separate type descriptions for each enum variant. These get an ID
 /// too because they have their own debuginfo node in LLVM IR.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, HashStable)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, StableHash)]
 pub(super) enum UniqueTypeId<'tcx> {
     /// The ID of a regular type as it shows up at the language level.
     Ty(Ty<'tcx>, private::HiddenZst),
@@ -54,7 +52,7 @@ impl<'tcx> UniqueTypeId<'tcx> {
     pub fn for_ty(tcx: TyCtxt<'tcx>, t: Ty<'tcx>) -> Self {
         assert_eq!(
             t,
-            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), t)
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), Unnormalized::new_wip(t))
         );
         UniqueTypeId::Ty(t, private::HiddenZst)
     }
@@ -62,7 +60,7 @@ impl<'tcx> UniqueTypeId<'tcx> {
     pub fn for_enum_variant_part(tcx: TyCtxt<'tcx>, enum_ty: Ty<'tcx>) -> Self {
         assert_eq!(
             enum_ty,
-            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), enum_ty)
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), Unnormalized::new_wip(enum_ty))
         );
         UniqueTypeId::VariantPart(enum_ty, private::HiddenZst)
     }
@@ -74,7 +72,7 @@ impl<'tcx> UniqueTypeId<'tcx> {
     ) -> Self {
         assert_eq!(
             enum_ty,
-            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), enum_ty)
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), Unnormalized::new_wip(enum_ty))
         );
         UniqueTypeId::VariantStructType(enum_ty, variant_idx, private::HiddenZst)
     }
@@ -86,11 +84,11 @@ impl<'tcx> UniqueTypeId<'tcx> {
     ) -> Self {
         assert_eq!(
             self_type,
-            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), self_type)
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), Unnormalized::new_wip(self_type))
         );
         assert_eq!(
             implemented_trait,
-            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), implemented_trait)
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), Unnormalized::new_wip(implemented_trait))
         );
         UniqueTypeId::VTableTy(self_type, implemented_trait, private::HiddenZst)
     }

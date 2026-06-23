@@ -27,7 +27,7 @@ use rustc_middle::ty::layout::{FnAbiOfHelpers, LayoutOfHelpers};
 use rustc_middle::ty::{Ty, TypeVisitableExt};
 use rustc_middle::{bug, span_bug, ty};
 use rustc_middle::{
-    mir::mono::CodegenUnit,
+    mono::CodegenUnit,
     ty::{Instance, TyCtxt},
 };
 use rustc_session::Session;
@@ -253,6 +253,10 @@ impl<'ll, 'tcx> MiscCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
         &self,
         _llfn: <CodegenCx<'ll, 'tcx> as rustc_codegen_ssa::traits::BackendTypes>::Function,
     ) {
+    }
+
+    fn intrinsic_call_expects_place_always(&self, _name: Symbol) -> bool {
+        false
     }
 }
 

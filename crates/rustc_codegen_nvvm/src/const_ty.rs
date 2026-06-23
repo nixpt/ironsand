@@ -7,7 +7,7 @@ use rustc_abi::{AddressSpace, HasDataLayout};
 use rustc_ast::Mutability;
 use rustc_codegen_ssa::common::TypeKind;
 use rustc_codegen_ssa::traits::*;
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use rustc_data_structures::stable_hash::StableHasher;
 use rustc_hashes::Hash128;
 use rustc_middle::bug;
 use rustc_middle::mir::interpret::{GlobalAlloc, Scalar};
@@ -60,6 +60,10 @@ impl<'ll, 'tcx> ConstCodegenMethods for CodegenCx<'ll, 'tcx> {
 
     fn const_u64(&self, i: u64) -> &'ll Value {
         self.const_uint(self.type_i64(), i)
+    }
+
+    fn const_i64(&self, i: i64) -> &'ll Value {
+        self.const_int(self.type_i64(), i)
     }
 
     fn const_usize(&self, i: u64) -> &'ll Value {

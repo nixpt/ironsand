@@ -16,7 +16,7 @@ use rustc_hir::def_id::{DefId, DefIdMap};
 use rustc_index::IndexVec;
 use rustc_middle::mir;
 use rustc_middle::ty::layout::{HasTyCtxt, HasTypingEnv};
-use rustc_middle::ty::{self, GenericArgKind, GenericArgsRef, Instance, Ty, TypeVisitableExt};
+use rustc_middle::ty::{self, GenericArgKind, GenericArgsRef, Instance, Ty, TypeVisitableExt, Unnormalized};
 use rustc_session::config::{self, DebugInfo};
 use rustc_span::symbol::Symbol;
 use rustc_span::{
@@ -375,7 +375,7 @@ impl<'ll, 'tcx> DebugInfoCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                 iter::zip(args, names)
                     .filter_map(|(kind, name)| {
                         if let GenericArgKind::Type(ty) = kind.kind() {
-                            let actual_type = cx.tcx.normalize_erasing_regions(cx.typing_env(), ty);
+                            let actual_type = cx.tcx.normalize_erasing_regions(cx.typing_env(), Unnormalized::new_wip(ty));
                             let actual_type_metadata = type_di_node(cx, actual_type);
                             let name = name.as_str();
                             Some(unsafe {

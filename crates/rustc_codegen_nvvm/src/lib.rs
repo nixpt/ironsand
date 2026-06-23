@@ -68,7 +68,7 @@ use rustc_errors::DiagCtxtHandle;
 use rustc_metadata::creader::MetadataLoaderDyn;
 use rustc_middle::util::Providers;
 use rustc_middle::{
-    dep_graph::{WorkProduct, WorkProductId},
+    dep_graph::{WorkProduct, WorkProductId, WorkProductMap},
     ty::TyCtxt,
 };
 use rustc_session::{
@@ -176,10 +176,10 @@ impl CodegenBackend for NvvmCodegenBackend {
             .unwrap_or_else(|| sess.target.cpu.to_string())
     }
 
-    fn codegen_crate(&self, tcx: TyCtxt<'_>, crate_info: &CrateInfo) -> Box<dyn std::any::Any> {
+    fn codegen_crate<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Box<dyn std::any::Any> {
         debug!("Codegen crate");
         Box::new(rustc_codegen_ssa::base::codegen_crate(
-            Self, tcx, crate_info,
+            Self, tcx,
         ))
     }
 
@@ -188,12 +188,13 @@ impl CodegenBackend for NvvmCodegenBackend {
         ongoing_codegen: Box<dyn std::any::Any>,
         sess: &Session,
         _outputs: &OutputFilenames,
-    ) -> (CompiledModules, FxIndexMap<WorkProductId, WorkProduct>) {
+        crate_info: &CrateInfo,
+    ) -> (CompiledModules, WorkProductMap) {
         debug!("Join codegen");
         let (compiled_modules, work_products) = ongoing_codegen
             .downcast::<OngoingCodegen<Self>>()
             .expect("Expected OngoingCodegen, found Box<Any>")
-            .join(sess);
+            .join(sess, crate_info);
 
         (compiled_modules, work_products)
     }
@@ -268,8 +269,8 @@ impl WriteBackendMethods for NvvmCodegenBackend {
     }
 
     fn optimize_and_codegen_fat_lto(
+        _sess: &Session,
         _cgcx: &CodegenContext,
-        _prof: &SelfProfilerRef,
         _shared_emitter: &rustc_codegen_ssa::back::write::SharedEmitter,
         _tm_factory: rustc_codegen_ssa::back::write::TargetMachineFactoryFn<Self>,
         _exported_symbols_for_lto: &[String],
@@ -285,10 +286,12 @@ impl WriteBackendMethods for NvvmCodegenBackend {
         _dcx: DiagCtxtHandle<'_>,
         _exported_symbols_for_lto: &[String],
         _each_linked_rlib_for_lto: &[PathBuf],
-        modules: Vec<(String, Self::ModuleBuffer)>,
-        cached_modules: Vec<(SerializedModule<Self::ModuleBuffer>, WorkProduct)>,
+        modules: Vec<rustc_codegen_ssa::back::write::ThinLtoInput<Self>>,
     ) -> (Vec<ThinModule<Self>>, Vec<WorkProduct>) {
-        lto::run_thin(cgcx, modules, cached_modules)
+        // Convert ThinLtoInput to the format lto::run_thin expects
+        let modules_vec = modules.into_iter().map(|m| (m.name().to_string(), m.source)).collect();
+        let cached_modules = Vec::new();
+        lto::run_thin(cgcx, modules_vec, cached_modules)
     }
 
     fn optimize(
