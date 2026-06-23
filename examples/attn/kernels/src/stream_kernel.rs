@@ -10,6 +10,8 @@ const OP_RMSNORM: u32 = 0;
 const OP_GEMV_F32: u32 = 1;
 const OP_ACTIVATION_SILU: u32 = 2;
 const OP_GEMV_Q4K: u32 = 3;  // Quantized GEMV (Q4_K format)
+const OP_STREAM_ATTN_BLOCK: u32 = 10;  // Sub-kernel: RmsNorm → QKV → Rope → FlashAttn → OProj
+const OP_STREAM_FFN_BLOCK: u32 = 11;   // Sub-kernel: RmsNorm → GateUp → SiLU → Down
 
 /// Queue entry: one operation for the stream kernel to execute.
 /// Must be kept small (fits in registers).
@@ -134,6 +136,45 @@ pub struct Q4KBlock {
     pub qs: [u8; 16],  // 16 bytes = 32 nibbles (4-bit weights)
 }
 
+/// Dispatch: Stream sub-block for attention (RmsNorm → QKV → Rope → FlashAttn → OProj)
+/// Internal queue-based micro-ops for tightly-coupled attention operations.
+/// Demonstrates composability: stream kernel can invoke stream operations.
+#[inline]
+unsafe fn op_stream_attn_block(
+    thread_idx: u32,
+    block_dim: u32,
+    op: &StreamOp,
+) {
+    // Pseudo-implementation: in reality, this would invoke a sub-queue
+    // For the spike, just mark that this kernel received the attention block task.
+    // Real version: queue of [RmsNorm, QKVProj, Rope, FlashAttn, OProj] internally.
+
+    // Validate inputs (stub)
+    let _seq_len = op.n;
+    let _hidden_dim = op.m;
+
+    // Comment: This is where the internal stream would execute.
+    // Each attention sub-block is a mini-stream kernel with its own queue.
+    asm!("bar.sync 0;");
+}
+
+/// Dispatch: Stream sub-block for FFN (RmsNorm → GateUp → SiLU → Down)
+/// Internal queue-based micro-ops for tightly-coupled FFN operations.
+#[inline]
+unsafe fn op_stream_ffn_block(
+    thread_idx: u32,
+    block_dim: u32,
+    op: &StreamOp,
+) {
+    // Pseudo-implementation: similar to attention block
+    // Real version: queue of [RmsNorm, GateUp, SiLU, Down] internally.
+
+    let _seq_len = op.n;
+    let _hidden_dim = op.m;
+
+    asm!("bar.sync 0;");
+}
+
 /// Dispatch: GEMV with Q4_K quantized weights y = A*x
 /// A is quantized (Q4_K format), x is f32, y is f32.
 /// Thread i computes one output y[i] = sum_j (dequant(A[i,j]) * x[j])
@@ -225,6 +266,8 @@ pub unsafe fn stream_kernel(
             OP_GEMV_F32 => op_gemv_f32(thread_idx, block_dim, op),
             OP_GEMV_Q4K => op_gemv_q4k(thread_idx, block_dim, op),
             OP_ACTIVATION_SILU => op_activation_silu(thread_idx, block_dim, op),
+            OP_STREAM_ATTN_BLOCK => op_stream_attn_block(thread_idx, block_dim, op),
+            OP_STREAM_FFN_BLOCK => op_stream_ffn_block(thread_idx, block_dim, op),
             _ => {} // Unknown opcode, skip
         }
     }

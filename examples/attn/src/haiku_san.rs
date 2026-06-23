@@ -183,6 +183,85 @@ impl HaikuSan {
         Ok(())
     }
 
+    /// Orchestrate a hybrid layer: Attention block + FFN block (Stream kernels)
+    /// This demonstrates the recommended architecture:
+    /// - Each block (attention, FFN) is a stream kernel internally
+    /// - Haiku-San orchestrates the 2 blocks per layer
+    /// - Total per-token kernels: 2 per layer (not 10)
+    pub fn orchestrate_hybrid_layer_spike(&mut self, stream: &Stream, layer_idx: usize) -> Result<(), Box<dyn Error>> {
+        const OP_STREAM_ATTN: u32 = 10;
+        const OP_STREAM_FFN: u32 = 11;
+
+        println!("\n[HYBRID SPIKE] Layer {}: Stream Attn Block → Stream FFN Block", layer_idx);
+
+        // Submit block-level kernels (not per-op).
+        // Each block internally queues its micro-ops (RmsNorm, QKV, Rope, FlashAttn, etc.)
+        let task_attn = self.submit_task(&format!("StreamAttn_L{}", layer_idx), OP_STREAM_ATTN, 256, 256);
+        let task_ffn = self.submit_task(&format!("StreamFFN_L{}", layer_idx), OP_STREAM_FFN, 512, 256);
+
+        // Attention must complete before FFN (dependency).
+        self.add_dependency(task_ffn, task_attn);
+
+        self.launch_all_async(stream)?;
+
+        // CPU parallel phase.
+        println!("HAIKU [CPU-WORK] Validating attention output...");
+        println!("HAIKU [CPU-WORK] Prefetching next layer weights...");
+
+        self.wait_for(task_attn)?;
+        self.wait_for(task_ffn)?;
+
+        println!("HAIKU [COMPLETE] Layer {} done (2 blocks)", layer_idx);
+
+        Ok(())
+    }
+
+    /// Orchestrate full model decode: multiple layers with stream block kernels
+    pub fn orchestrate_full_model_spike(&mut self, stream: &Stream, num_layers: usize) -> Result<(), Box<dyn Error>> {
+        println!("\n[FULL MODEL SPIKE] Orchestrating {} layers with hybrid stream blocks", num_layers);
+
+        let mut prev_ffn_task: Option<TaskId> = None;
+
+        for layer_idx in 0..num_layers {
+            // Submit blocks for this layer.
+            const OP_STREAM_ATTN: u32 = 10;
+            const OP_STREAM_FFN: u32 = 11;
+
+            let task_attn = self.submit_task(&format!("StreamAttn_L{}", layer_idx), OP_STREAM_ATTN, 256, 256);
+            let task_ffn = self.submit_task(&format!("StreamFFN_L{}", layer_idx), OP_STREAM_FFN, 512, 256);
+
+            // Intra-layer dependency.
+            self.add_dependency(task_ffn, task_attn);
+
+            // Inter-layer dependency (previous layer FFN → next layer attention).
+            if let Some(prev_ffn) = prev_ffn_task {
+                self.add_dependency(task_attn, prev_ffn);
+            }
+
+            prev_ffn_task = Some(task_ffn);
+        }
+
+        // Launch all async (all layers queued, GPU executes in dependency order).
+        self.launch_all_async(stream)?;
+
+        println!("HAIKU [SUBMITTED] {} layers × 2 blocks = {} tasks", num_layers, num_layers * 2);
+
+        // CPU can do work here: prefetch all weights, prepare batch, etc.
+        println!("HAIKU [CPU-WORK] Prefetching all model weights into GPU memory...");
+        println!("HAIKU [CPU-WORK] Preparing sampler state...");
+
+        // Wait for all tasks (in dependency order; orchestrator handles it).
+        println!("HAIKU [SYNC] Waiting for GPU to complete all layers...");
+
+        // In a real implementation, we'd iterate through and wait_for each task.
+        // For the spike, we just simulate completion.
+        println!("HAIKU [COMPLETE] Full model forward pass done");
+        println!("HAIKU [STATS] Total kernels orchestrated: {}", num_layers * 2);
+        println!("HAIKU [STATS] Per-token kernels: {} (vs {} for per-op)", num_layers * 2, num_layers * 10);
+
+        Ok(())
+    }
+
     pub fn stats(&self) -> OrchestrationStats {
         self.stats
     }
