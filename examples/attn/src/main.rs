@@ -154,9 +154,11 @@ fn naive_attn_cpu(
 fn run_flash_attn(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
     // Small shape for correctness, then a few larger ones for timing.
     let shapes: &[(usize, usize)] = &[
-        (32, 32),    // smoke test
-        (64, 64),    // still fast CPU ref
-        (512, 512),  // first real shape
+        (32, 32),      // smoke test
+        (64, 64),      // still fast CPU ref
+        (512, 512),    // first real shape
+        (1024, 1024),  // medium shape
+        (2048, 2048),  // near-inference scale
     ];
 
     for &(l_seq, s_seq) in shapes {
@@ -178,11 +180,15 @@ fn run_flash_attn_shape(
     let k_f = Array2::<f32>::random((s_seq, DH), Uniform::new(-1.0f32, 1.0));
     let v_f = Array2::<f32>::random((s_seq, DH), Uniform::new(-0.5f32, 0.5));
 
-    // CPU reference (f32 precision):
+    // CPU reference (skip for large shapes — O(L²·Dh) is too slow beyond ~512).
     let q_flat: Vec<f32> = q_f.as_standard_layout().iter().copied().collect();
     let k_flat: Vec<f32> = k_f.as_standard_layout().iter().copied().collect();
     let v_flat: Vec<f32> = v_f.as_standard_layout().iter().copied().collect();
-    let o_ref = naive_attn_cpu(&q_flat, &k_flat, &v_flat, l_seq, s_seq, DH);
+    let o_ref: Option<Vec<f32>> = if l_seq <= 512 {
+        Some(naive_attn_cpu(&q_flat, &k_flat, &v_flat, l_seq, s_seq, DH))
+    } else {
+        None
+    };
 
     // Convert to f16 for GPU:
     let to_h16 = |v: &[f32]| -> Vec<u16> { v.iter().map(|&x| f16::from_f32(x).to_bits()).collect() };
@@ -197,10 +203,11 @@ fn run_flash_attn_shape(
 
     let f = module.get_function("flash_attn")?;
     let grid = (l_seq / 16) as u32;
+    const BLOCK: u32 = 128; // 4 warps per block (DH-split)
 
     let run = || -> Result<(), Box<dyn Error>> {
         unsafe {
-            launch!(f<<<grid, 32, 0, stream>>>(
+            launch!(f<<<grid, BLOCK, 0, stream>>>(
                 q_gpu.as_device_ptr(), q_gpu.len(),
                 k_gpu.as_device_ptr(), k_gpu.len(),
                 v_gpu.as_device_ptr(), v_gpu.len(),
@@ -211,7 +218,7 @@ fn run_flash_attn_shape(
         Ok(())
     };
 
-    // Time it (skip for small shapes):
+    // Time it (skip for small shapes — CPU reference too slow for large ones):
     let ms = if l_seq >= 512 {
         time(stream, NUM_WARMUPS, NUM_RUNS, run)?
     } else {
@@ -224,26 +231,6 @@ fn run_flash_attn_shape(
     o_gpu.copy_to(&mut o_bits)?;
     let o_gpu_f: Vec<f32> = o_bits.iter().map(|&b| f16::from_bits(b).to_f32()).collect();
 
-    // Relative L2 error.
-    let diff_sq: f64 = o_ref
-        .iter()
-        .zip(&o_gpu_f)
-        .map(|(&r, &g)| (r as f64 - g as f64).powi(2))
-        .sum();
-    let ref_sq: f64 = o_ref.iter().map(|&r| (r as f64).powi(2)).sum();
-    let l2_rel = (diff_sq / ref_sq.max(1e-12)).sqrt();
-
-    // Max absolute error on large-magnitude outputs (|o_ref| > 0.1).
-    let mut max_abs_big = 0.0f64;
-    for (&r, &g) in o_ref.iter().zip(&o_gpu_f) {
-        if r.abs() > 0.1 {
-            let e = (r as f64 - g as f64).abs();
-            if e > max_abs_big {
-                max_abs_big = e;
-            }
-        }
-    }
-
     let timing = if ms > 0.0 {
         let flops = 4.0 * l_seq as f64 * s_seq as f64 * DH as f64; // QK^T + PV
         let tflops = flops / (ms as f64 * 1e-3) / 1e12;
@@ -252,23 +239,44 @@ fn run_flash_attn_shape(
         "".to_string()
     };
 
-    let status = if l2_rel < 0.01 { "PASS" } else { "FAIL" };
-    println!(
-        "FLASH-ATTN [{status}] L={l_seq} S={s_seq} Dh={DH}  \
-         L2-rel={l2_rel:.2e}  max_abs(|o|>0.1)={max_abs_big:.2e}  {timing}"
-    );
-    if l2_rel >= 0.01 {
-        // Show a few mismatches for debugging:
-        let mut shown = 0;
-        for i in 0..l_seq * DH {
-            if (o_ref[i] as f64 - o_gpu_f[i] as f64).abs() > 0.05 && shown < 4 {
-                println!(
-                    "  mismatch [{},{}] ref={:.4} gpu={:.4}",
-                    i / DH, i % DH, o_ref[i], o_gpu_f[i]
-                );
-                shown += 1;
+    if let Some(ref o_ref) = o_ref {
+        // Relative L2 error vs CPU reference.
+        let diff_sq: f64 = o_ref
+            .iter()
+            .zip(&o_gpu_f)
+            .map(|(&r, &g)| (r as f64 - g as f64).powi(2))
+            .sum();
+        let ref_sq: f64 = o_ref.iter().map(|&r| (r as f64).powi(2)).sum();
+        let l2_rel = (diff_sq / ref_sq.max(1e-12)).sqrt();
+
+        let mut max_abs_big = 0.0f64;
+        for (&r, &g) in o_ref.iter().zip(&o_gpu_f) {
+            if r.abs() > 0.1 {
+                let e = (r as f64 - g as f64).abs();
+                if e > max_abs_big { max_abs_big = e; }
             }
         }
+
+        let status = if l2_rel < 0.01 { "PASS" } else { "FAIL" };
+        println!(
+            "FLASH-ATTN [{status}] L={l_seq} S={s_seq} Dh={DH}  \
+             L2-rel={l2_rel:.2e}  max_abs(|o|>0.1)={max_abs_big:.2e}  {timing}"
+        );
+        if l2_rel >= 0.01 {
+            let mut shown = 0;
+            for i in 0..l_seq * DH {
+                if (o_ref[i] as f64 - o_gpu_f[i] as f64).abs() > 0.05 && shown < 4 {
+                    println!(
+                        "  mismatch [{},{}] ref={:.4} gpu={:.4}",
+                        i / DH, i % DH, o_ref[i], o_gpu_f[i]
+                    );
+                    shown += 1;
+                }
+            }
+        }
+    } else {
+        // Large shape — no CPU reference, just report timing.
+        println!("FLASH-ATTN [TIMING] L={l_seq} S={s_seq} Dh={DH}  {timing}");
     }
     Ok(())
 }
