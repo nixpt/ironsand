@@ -42,19 +42,27 @@ H=32: ~5.6 TFLOP/s (was 4.1 TFLOP/s for H=1 in v4 due to L2 cache benefit).
 - ld_global_v4 / st_shared_v4: require 16-byte aligned addresses. Q/K tiles have this
   because BR=BC=16, DH=128 → row stride = 256 bytes, all 8-u16 chunks are 16-byte aligned.
 
-## Next Steps (attention arc, post-v7)
-**cp.async pipelining** — TESTED, NOT BENEFICIAL. K/V loads are not the bottleneck; the
-FlashAttention load/compute pattern already has good smem locality. Issuing async K[i+1]
-while computing with K[i] requires careful sync (to avoid reading partially overwritten K_SMEM),
-and loading V[i+1] early adds extra work per iteration. Net result: 20% slower (4.5→5.3 TFLOP/s).
-Decision: load remains synchronous for simplicity and current performance.
+## v7: Final stable release (6.4 TFLOP/s H=32)
 
-1) **Larger Br=32** — 8 warps, 2× query rows per block (BLOCK_THREADS=256).
-   Smem rises to 3×8 KB = 24 KB (still 2 blocks/SM). Better device utilization for
-   larger S. Requires careful register allocation (currently 56 regs; room exists).
-2) **Warp-specialized QK^T** — 2 warps compute S, 4 compute PV. Allows QK^T to use
-   different tile shapes (m=32 or m=16, n=16) or higher throughput on K dimension.
-   Requires shared softmax via smem (~4 KB). Trade: complexity vs throughput.
+## Attempted next steps
+
+**Br=32 (8 warps)** — TESTED, CORRECTNESS BROKEN (L2-rel~0.95). Root cause: All 8 warps
+independently compute & apply softmax over the same attention scores. Since each warp's
+m_g/l_g diverges (shfl_xor is per-warp), P values differ per-warp, producing inconsistent
+output. Simple fix would require cross-warp reduction on softmax state (not available).
+
+Fix requires **warp-specialized QK^T**: 2 warps compute S, apply softmax to smem, then all
+warps read P and compute PV. Avoids softmax divergence but adds complexity (barriers,
+smem coordination, async across warp groups). Estimated ~20-30% harder to implement correctly.
+
+**cp.async pipelining** — TESTED, NOT BENEFICIAL. K/V loads are not the bottleneck.
+FlashAttention's tight load→compute pattern already has good smem locality. Adding async K
++ early V load adds work per iteration without overlap. Net: 20% slower.
+
+## Known limitations
+- Softmax computed redundantly by all warps (OK for Br≤16, breaks at Br≥32)
+- Bank conflicts in V_T_SMEM reduced to 8-way via swizzle (could go lower with full banked layout)
+- No prefetching/pipelining (loads are synchronous but not a bottleneck for current sizes)
 
 ## GEMV arc (previous, uncommitted)
 GEMV edits were NOT committed (v3 Q4_K, Q6_K warp, bench rows). If resuming GEMV: see `.dejavue/state.md` and `.dejavue/decisions.md` — all context is there.
