@@ -65,17 +65,24 @@ Single persistent kernel per token:
 
 **Kernel compiles**: ✓  
 ```
-stream_kernel (PTX .entry) with switch(opcode) dispatch
+stream_kernel (PTX .entry) with 4-opcode switch dispatch
 ```
 
 **Mechanism proven**: ✓  
-- RmsNorm, GEMV_F32, SiLU opcodes implemented
+- **Op 0: RmsNorm** — normalization (block-reduce pattern)
+- **Op 1: GEMV_F32** — dense reference (per-thread row matmul)
+- **Op 2: SiLU** — activation (sigmoid × input)
+- **Op 3: GEMV_Q4K** — quantized matmul (realistic production op)
+  - Q4K format: block-wise scale + min, 4-bit nibble weights
+  - Dequantization: weight = (nibble - 8) * scale + min
+  - Proves diverse op types coexist without register bloat
 - Inline asm barriers (`bar.sync 0`) compile cleanly
 - Kernel loads and is callable
 
 **What's NOT proven yet**: Full end-to-end with real data  
 - Queue marshalling (Rust ↔ GPU) requires cust FFI work
 - This is engineering, not research — the design is sound
+- Per-op register profiling (occupancy analysis on 5070 Ti)
 
 ---
 
@@ -172,13 +179,29 @@ This makes it **safer to implement and easier to extend** while keeping the late
 
 ## Files
 
-- `examples/attn/kernels/src/stream_kernel.rs` — persistent kernel implementation (3-op spike)
-- `examples/attn/src/main.rs` — mechanism proof (loads, dispatches)
-- This doc: design rationale
+- `examples/attn/kernels/src/stream_kernel.rs` — persistent kernel (4-op dispatch)
+  - Opcodes: RmsNorm, GEMV_F32, SiLU, GEMV_Q4K
+  - Q4KBlock struct: scale + min + nibble weights
+- `examples/attn/kernels/src/lib.rs` — exports stream_kernel, StreamOp, StreamQueue, Q4KBlock
+- `examples/attn/src/main.rs` — mechanism proof (loads, comments updated)
+- This doc: design rationale + architectural decisions
 
-## Next
+## Commits
 
-1. **Extend spike**: Add Q4_K GEMV opcode (realistic op)
-2. **Integrate into zorro**: Build queue in decode loop instead of per-op launches
-3. **Measure**: Compare stream vs. current on 5070 Ti (latency + util)
-4. **Document per-op budgets**: Max registers before occupancy drops
+- 243e196: Stream kernel spike + initial design doc
+- 1ed9c28: Add Q4K GEMV opcode (realistic quantized kernel)
+
+## Next Steps (Sequenced)
+
+1. **✓ DONE**: Design proof (queue-based dispatch avoids deadlock)
+2. **✓ DONE**: Mechanism spike (4-op kernel compiles)
+3. **TODO**: Queue marshalling in zorro decode loop
+   - Build StreamQueue on host (pinned memory)
+   - Launch persistent kernel once per token
+   - Feed all per-layer ops through queue
+4. **TODO**: Per-op occupancy analysis
+   - Measure register pressure for each op on 5070 Ti
+   - Document max grid size before drops
+5. **TODO**: Performance measurement
+   - Compare stream vs. current decode loop (latency + GPU util)
+   - Target: 2-3× on short context, 1.5-2× on medium
