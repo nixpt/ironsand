@@ -1,4 +1,6 @@
-//! Attention kernel tests: f16 mma.sync spike + FlashAttention-2 correctness.
+//! Attention kernel tests: f16 mma.sync + FlashAttention-2 + Stream kernel + Haiku-San orchestrator.
+
+mod haiku_san;
 
 use std::error::Error;
 
@@ -545,6 +547,30 @@ fn run_stream_kernel_spike(module: &Module, _stream: &Stream) -> Result<(), Box<
     Ok(())
 }
 
+// ── Haiku-San Orchestrator Spike ────────────────────────────────────────────
+
+fn run_haiku_san_spike(stream: &Stream) -> Result<(), Box<dyn Error>> {
+    use haiku_san::HaikuSan;
+
+    println!("=== Haiku-San: CPU/GPU Orchestrator (2 spikes) ===");
+
+    // Spike 1: Simple 2-op chain (GEMV_Q4K → SiLU)
+    let mut orchestrator = HaikuSan::new();
+    orchestrator.orchestrate_two_op_spike(stream)?;
+
+    // Spike 2: Full-layer chain (RmsNorm → QKV → FFNGateUp → SiLU)
+    let mut orchestrator = HaikuSan::new();
+    orchestrator.orchestrate_layer_spike(stream)?;
+
+    println!("\nHAIKU-SAN [SUMMARY]");
+    println!("  Concept: CPU orchestrates async GPU kernels");
+    println!("  Benefit: CPU/GPU parallel execution (not lockstep)");
+    println!("  Design: Dependency graph + event-based sync");
+    println!("  Next: Plumb into zorro decode loop");
+
+    Ok(())
+}
+
 // ── Performance characterization (summary) ──────────────────────────────────
 
 fn run_perf_summary() {
@@ -578,8 +604,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     run_flash_attn_gqa(&module, &stream)?;
     run_mqa_test(&module, &stream)?;
 
-    println!("\n=== Stream kernel spike (3-op persistent queue) ===");
+    println!("\n=== Stream kernel spike (4-op persistent queue) ===");
     run_stream_kernel_spike(&module, &stream)?;
+
+    println!("\n=== Haiku-San orchestrator (CPU/GPU hybrid) ===");
+    run_haiku_san_spike(&stream)?;
 
     println!();
     run_perf_summary();
