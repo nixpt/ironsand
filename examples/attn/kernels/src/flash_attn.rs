@@ -1,30 +1,29 @@
-//! FlashAttention-2-style prefill v3: ldmatrix for Q+K+VT B-fragments.
+//! FlashAttention-2-style prefill v4: O in per-thread f32 registers (no O_SMEM).
 //!
 //! `O[L, Dh] = softmax(Q[L,Dh] · K[S,Dh]^T / √Dh) · V[S, Dh]`
 //!
 //! Fixed: Dh=128, Br=16 (query rows/block), Bc=16 (KV columns/step). 4 warps per block.
 //! Grid: `(⌈L/16⌉,)` blocks × 128 threads. L and S must be multiples of 16.
 //!
-//! ## v3 over v2
-//!   - **QK^T B**: ldmatrix.x2.trans per k-step (2 calls) replaces 4 scalar ld_f16x2 loads.
-//!     n-tile j=0 (KV rows 0-7): `addr = K_smem[(lane&7)*DH + kb + (lane&8)]`
-//!     n-tile j=1 (KV rows 8-15): row offset +8.
-//!   - **PV B**: ldmatrix.x2 per n-tile replaces 2 scalar ld_f16x2 loads.
-//!     `addr = V_T_smem[(t*8 + (lane&7))*BC + (lane&8)]`
-//!   - Branchless address formulas — `lane&7` selects sub-matrix row, `lane&8` selects k-half.
+//! ## v4 over v3
+//!   - **O in registers**: O_SMEM (8 KB f32) replaced by per-thread `o_g[8]`/`o_g8[8]`.
+//!     Layout: `o_g[tt*2+r]` = O[grp, dh_base+tt*8+l2*2+r] for tt=0..3, r=0..1.
+//!     Rescale/normalize/accumulate are pure register ops — no smem traffic.
+//!   - **Smem: 20 KB → 12 KB**: enables 4 blocks/SM → 16 warps/SM (50% occupancy, was 25%).
+//!   - **Final write**: scattered per-thread stores (16 f16 cells/thread) replacing coalesced
+//!     smem→global pass. Worse coalescing but eliminates 8 KB smem + one sync_threads().
 //!
-//! ## Parallelism strategy (unchanged from v2)
+//! ## Parallelism strategy (unchanged from v2/v3)
 //!
-//! **4 warps per block** with identical smem layout (20 KB):
+//! **4 warps per block**, smem now 12 KB:
 //!   - All 4 warps compute the same S[16,16] = Q·K^T (redundant but cheap).
 //!   - Warp w owns the Dh-slice [w*32, (w+1)*32) of O and 4 PV n-tiles starting at t=w*4.
-//!   - Race-free O_smem: each warp writes disjoint Dh cells.
 //!
-//! Occupancy: 48 KB smem / 20 KB per block = 2 blocks per SM → 8 warps per SM.
+//! Occupancy: 48 KB smem / 12 KB per block = 4 blocks per SM → 16 warps per SM.
 //!
 //! ## Fragment layout (Ampere+, grp=lane/4, l2=lane%4, warp_id=tid/32)
 //! QK^T A: ldmatrix.x4 → [a0..a3] from Q_smem[l%16, kb+(l/16)*8].
-//! QK^T B: ldmatrix.x2.trans (×2/k-step) from K_smem row-major.
+//! QK^T B: ldmatrix.x2 (no trans, ×2/k-step) from K_smem row-major.
 //! PV A: register-packed P values.
 //! PV B: ldmatrix.x2 (×1/n-tile) from V_T_smem col-major B layout.
 
@@ -165,7 +164,7 @@ unsafe fn ldmatrix_b2(_addr: u64) -> [u32; 2] {
 
 // ── Kernel ──────────────────────────────────────────────────────────────────
 
-/// FlashAttention-2 prefill v2: 4-warp DH-split.
+/// FlashAttention-2 prefill v4: 4-warp DH-split, O in per-thread registers.
 /// `O[L,Dh] = softmax(Q·K^T/√Dh)·V`. f16 in/out.
 /// Dh=128 fixed; L and S must be multiples of 16. Launch `<<<ceil(L/16), 128>>>`.
 ///
@@ -187,14 +186,13 @@ pub unsafe fn flash_attn(
     static mut K_SMEM: [MaybeUninit<u16>; BC * DH] = [MaybeUninit::uninit(); BC * DH];
     #[address_space(shared)]
     static mut V_T_SMEM: [MaybeUninit<u16>; DH * BC] = [MaybeUninit::uninit(); DH * BC];
-    #[address_space(shared)]
-    static mut O_SMEM: [MaybeUninit<f32>; BR * DH] = [MaybeUninit::uninit(); BR * DH];
+    // O_SMEM removed in v4 — O lives in per-thread registers (o_g / o_g8).
+    // Smem: 3×4 KB = 12 KB (was 20 KB with O_SMEM) → 4 blocks/SM, 16 warps/SM.
 
     // Raw smem pointers — avoids Rust 2024 ban on &T/&mut T to static mut.
     let q_smem  = addr_of_mut!(Q_SMEM)   as *mut MaybeUninit<u16>;
     let k_smem  = addr_of_mut!(K_SMEM)   as *mut MaybeUninit<u16>;
     let vt_smem = addr_of_mut!(V_T_SMEM)  as *mut MaybeUninit<u16>;
-    let o_smem  = addr_of_mut!(O_SMEM)   as *mut MaybeUninit<f32>;
 
     let tid        = thread::thread_idx_x() as usize;
     let warp_id    = tid / 32;   // 0..3
@@ -214,16 +212,21 @@ pub unsafe fn flash_attn(
     // PV n-tiles: warp w handles t in [warp_id*VTILES_PER_WARP, (warp_id+1)*VTILES_PER_WARP).
     let t_base = warp_id * VTILES_PER_WARP; // 0, 4, 8, or 12
 
-    // ── Load Q tile; zero O_SMEM (all BLOCK_THREADS cooperate, stride BLOCK_THREADS) ──
+    // ── Load Q tile (all BLOCK_THREADS cooperate, stride BLOCK_THREADS) ────────
     let mut e = tid;
     while e < BR * DH {
         let row = e / DH;
         let dh  = e % DH;
         unsafe { (*q_smem.add(e)).write(*q.as_ptr().add((query_base + row) * DH + dh)) };
-        unsafe { (*o_smem.add(e)).write(0.0f32) };
         e += BLOCK_THREADS;
     }
     thread::sync_threads();
+
+    // Per-thread O accumulators in f32 registers (no O_SMEM).
+    // o_g[tt*2+r]  = O[grp,   dh_base + tt*8 + l2*2 + r]  (tt=0..3, r=0..1)
+    // o_g8[tt*2+r] = O[grp+8, dh_base + tt*8 + l2*2 + r]
+    let mut o_g:  [f32; 8] = [0.0; 8];
+    let mut o_g8: [f32; 8] = [0.0; 8];
 
     let mut m_g  = f32::NEG_INFINITY;
     let mut m_g8 = f32::NEG_INFINITY;
@@ -325,20 +328,11 @@ pub unsafe fn flash_attn(
         l_g  = l_g  * rescale_g  + l_tile_g;
         l_g8 = l_g8 * rescale_g8 + l_tile_g8;
 
-        // Rescale O_SMEM: each warp only touches its own Dh-slice [dh_base, dh_base+32).
-        // Thread (grp, l2) owns dh = dh_base+l2, dh_base+l2+4, … within that slice.
-        let mut dh = dh_base + l2;
-        while dh < dh_base + DH_PER_WARP {
-            unsafe {
-                let ov = (*o_smem.add(grp * DH + dh)).assume_init();
-                (*o_smem.add(grp * DH + dh)).write(ov * rescale_g);
-                let ov = (*o_smem.add((grp + 8) * DH + dh)).assume_init();
-                (*o_smem.add((grp + 8) * DH + dh)).write(ov * rescale_g8);
-            }
-            dh += 4;
-        }
+        // Rescale O registers (pure register ops — no smem traffic).
+        for v in &mut o_g  { *v *= rescale_g; }
+        for v in &mut o_g8 { *v *= rescale_g8; }
 
-        // ── PV: O_smem += P · V_T_smem^T ────────────────────────────────────
+        // ── PV: o_g/o_g8 += P · V_T_smem^T ─────────────────────────────────
         // P packed from registers — no P_SMEM. Fragment registers:
         //   a0: row=grp,   k=l2*2..+1 (BC col 0-7)   a2: row=grp,   k=l2*2+8..+9
         //   a1: row=grp+8, k=l2*2..+1                 a3: row=grp+8, k=l2*2+8..+9
@@ -352,7 +346,7 @@ pub unsafe fn flash_attn(
         };
 
         // Warp w handles V_T n-tiles t = [t_base, t_base + VTILES_PER_WARP).
-        // O addresses for warp w: O_smem[grp*DH + t*8 + l2*2..] ∈ [dh_base, dh_base+32). ✓
+        // o_g[tt*2+r] accumulates O[grp, dh_base+tt*8+l2*2+r]; tt = t - t_base ∈ [0,4).
         // B-fragment from V_T_smem [DH, BC] using ldmatrix.x2 (no transpose — already col-major).
         // Lane l provides V_T_smem[(t*8 + (l&7))*BC + (l&8)]:
         //   lanes 0-7  → matrix 0 row (l&7) = V_T[t*8+l, 0..7]    (k=0..7)
@@ -362,46 +356,39 @@ pub unsafe fn flash_attn(
         let vt_lane_koff = lane & 8;  // 0 or 8 — selects k-half, constant per lane
         let mut t = t_base;
         while t < t_base + VTILES_PER_WARP {
+            let tt = t - t_base;   // 0..VTILES_PER_WARP
             let vt_addr = unsafe { vtsp.add((t * 8 + (lane & 7)) * BC + vt_lane_koff) as u64 };
             let [b0, b1] = unsafe { ldmatrix_b2(vt_addr) };
             let d = unsafe { mma_f16(pa, [b0, b1], [0.0f32; 4]) };
-            unsafe {
-                let ov = (*o_smem.add(grp * DH + t * 8 + l2 * 2)).assume_init();
-                (*o_smem.add(grp * DH + t * 8 + l2 * 2)).write(ov + d[0]);
-                let ov = (*o_smem.add(grp * DH + t * 8 + l2 * 2 + 1)).assume_init();
-                (*o_smem.add(grp * DH + t * 8 + l2 * 2 + 1)).write(ov + d[1]);
-                let ov = (*o_smem.add((grp + 8) * DH + t * 8 + l2 * 2)).assume_init();
-                (*o_smem.add((grp + 8) * DH + t * 8 + l2 * 2)).write(ov + d[2]);
-                let ov = (*o_smem.add((grp + 8) * DH + t * 8 + l2 * 2 + 1)).assume_init();
-                (*o_smem.add((grp + 8) * DH + t * 8 + l2 * 2 + 1)).write(ov + d[3]);
-            }
+            o_g[tt * 2]      += d[0];
+            o_g[tt * 2 + 1]  += d[1];
+            o_g8[tt * 2]     += d[2];
+            o_g8[tt * 2 + 1] += d[3];
             t += 1;
         }
-        // Barrier: all warps must finish PV (writes V_T_smem/O_smem) before next K/V load.
+        // Barrier: protects V_T_SMEM/K_SMEM from being overwritten by next iteration's load.
         thread::sync_threads();
 
         kv_tile += 1;
     }
 
-    // ── Normalize O = O / l (each warp handles its Dh slice) ────────────────
-    let mut dh = dh_base + l2;
-    while dh < dh_base + DH_PER_WARP {
-        unsafe {
-            let ov = (*o_smem.add(grp * DH + dh)).assume_init();
-            (*o_smem.add(grp * DH + dh)).write(ov / l_g);
-            let ov = (*o_smem.add((grp + 8) * DH + dh)).assume_init();
-            (*o_smem.add((grp + 8) * DH + dh)).write(ov / l_g8);
-        }
-        dh += 4;
-    }
-    thread::sync_threads();
+    // ── Normalize O = O / l (pure register ops) ─────────────────────────────
+    for v in &mut o_g  { *v /= l_g; }
+    for v in &mut o_g8 { *v /= l_g8; }
 
-    // ── Write f16 to global (all BLOCK_THREADS cooperate, stride BLOCK_THREADS) ──
+    // ── Scatter O to global (each thread writes its 16 f16 cells directly) ───
+    // No smem round-trip. Each thread owns dh = dh_base + tt*8 + l2*2 (+1) for tt=0..3.
     let out_base = query_base * DH;
-    let mut e = tid;
-    while e < BR * DH {
-        let val = unsafe { (*o_smem.add(e)).assume_init() };
-        unsafe { *o.add(out_base + e) = cvt_f32_f16(val) };
-        e += BLOCK_THREADS;
+    let mut tt = 0usize;
+    while tt < VTILES_PER_WARP {
+        let dh0 = dh_base + tt * 8 + l2 * 2;
+        let dh1 = dh0 + 1;
+        unsafe {
+            *o.add(out_base + grp * DH + dh0)       = cvt_f32_f16(o_g[tt * 2]);
+            *o.add(out_base + grp * DH + dh1)       = cvt_f32_f16(o_g[tt * 2 + 1]);
+            *o.add(out_base + (grp + 8) * DH + dh0) = cvt_f32_f16(o_g8[tt * 2]);
+            *o.add(out_base + (grp + 8) * DH + dh1) = cvt_f32_f16(o_g8[tt * 2 + 1]);
+        }
+        tt += 1;
     }
 }
