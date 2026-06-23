@@ -2,7 +2,7 @@
 
 ## GQA v1 (Grouped-Query Attention) — COMPLETE ✓
 
-**Status**: Correctness verified. Ready for performance analysis.
+**Status**: Correctness verified. Kernel stable, ready for performance tuning.
 
 **What it is**: Multi-head attention with K/V head sharing.
 - Q: H query heads (e.g., H=12)
@@ -18,19 +18,30 @@
 
 **Correctness**: ✓ PASS
 - Test: H=12 query heads, G=4 KV heads (3:1 ratio), L=64, S=64
-- Relative error: 7.52e-5 (f16 quantization noise)
+- Relative error: 7.17e-5 (f16 quantization noise, expected)
 
 **Performance**: Not yet characterized
 - Expected: Reduced memory traffic (K/V loads are 1/3 less than standard)
 - Estimated speedup: ~10-20% for KV-bound workloads
 - TBD: Measure vs standard attention
 
-## Next Variants
+## MQA (Multi-Query Attention) — COMPLETE ✓
 
-**MQA (Multi-Query Attention)** — Extreme case of GQA
+**Status**: Correctness verified. Runs via same GQA kernel (G=1 special case).
+
+**What it is**: Extreme case of GQA.
 - G=1: All H query heads share the single KV head
-- Even larger memory savings (H× reduction in KV cache)
-- Simple kernel modification: GQA with G=1
+- Extreme memory savings: H× reduction in KV cache vs standard
+- Use case: Inference engines prioritizing latency (one batch) over batch variance
+
+**Implementation**:
+- Uses same `flash_attn_gqa` kernel with `num_kv_heads=1`
+- Kernel automatically applies GQA mapping: `kv_head = 0` for all queries
+
+**Correctness**: ✓ PASS
+- Test: H=32 query heads, G=1 KV head, L=64, S=64
+- Relative error: 7.19e-5 (f16 quantization noise, expected)
+- Confirms GQA kernel scales to extreme head ratios
 
 **Sparse attention** — *Not pursued yet*
 - Local (sliding window): Only attend to [i - W, i + W]
