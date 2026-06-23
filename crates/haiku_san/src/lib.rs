@@ -52,6 +52,9 @@ use std::error::Error;
 use cust::event::Event;
 use cust::stream::Stream;
 
+pub mod roles;
+pub use roles::{HaikuSanRoleExt, KernelRole, Phase, RoleDispatcher};
+
 pub type TaskId = u64;
 
 /// A kernel task to be executed on GPU.
@@ -99,6 +102,8 @@ pub struct HaikuSan {
     completed: Vec<TaskId>,
     /// Orchestration performance stats
     stats: OrchestrationStats,
+    /// Role dispatcher for phase-aware kernel selection
+    pub(crate) dispatcher: RoleDispatcher,
 }
 
 impl HaikuSan {
@@ -110,6 +115,7 @@ impl HaikuSan {
             inflight: HashMap::new(),
             completed: Vec::new(),
             stats: OrchestrationStats::default(),
+            dispatcher: RoleDispatcher::new(),
         }
     }
 
