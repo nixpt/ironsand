@@ -134,6 +134,48 @@ unsafe fn ldmatrix_a4(_addr: u64) -> [u32; 4] {
     [0; 4]
 }
 
+/// Load 4×u32 (128 bits = 8×u16) from global memory.
+#[cfg(target_os = "cuda")]
+#[inline(always)]
+unsafe fn ld_global_v4(addr: u64) -> [u32; 4] {
+    let (mut r0, mut r1, mut r2, mut r3): (u32, u32, u32, u32);
+    unsafe {
+        asm!(
+            "ld.global.v4.b32 {{{0},{1},{2},{3}}}, [{4}];",
+            out(reg32) r0,
+            out(reg32) r1,
+            out(reg32) r2,
+            out(reg32) r3,
+            in(reg64) addr,
+        );
+    }
+    [r0, r1, r2, r3]
+}
+#[cfg(not(target_os = "cuda"))]
+#[inline(always)]
+unsafe fn ld_global_v4(_addr: u64) -> [u32; 4] {
+    [0; 4]
+}
+
+/// Store 4×u32 (128 bits) to shared memory (address must be 16-byte aligned).
+#[cfg(target_os = "cuda")]
+#[inline(always)]
+unsafe fn st_shared_v4(addr: u64, data: [u32; 4]) {
+    unsafe {
+        asm!(
+            "st.shared.v4.b32 [{0}], {{{1},{2},{3},{4}}};",
+            in(reg64) addr,
+            in(reg32) data[0],
+            in(reg32) data[1],
+            in(reg32) data[2],
+            in(reg32) data[3],
+        );
+    }
+}
+#[cfg(not(target_os = "cuda"))]
+#[inline(always)]
+unsafe fn st_shared_v4(_addr: u64, _data: [u32; 4]) {}
+
 /// Cooperative warp load of 2×(m8n8) f16 submatrices from shared memory, **no transpose**.
 /// Works for both K and V_T B-fragments — source is row-major in both cases.
 ///
@@ -226,13 +268,22 @@ pub unsafe fn flash_attn(
     let dh_base = warp_id * DH_PER_WARP; // 0, 32, 64, or 96
     let t_base  = warp_id * VTILES_PER_WARP; // 0, 4, 8, or 12
 
-    // ── Load Q tile (all BLOCK_THREADS cooperate, stride BLOCK_THREADS) ────────
-    let mut e = tid;
-    while e < BR * DH {
-        let row = e / DH;
-        let dh  = e % DH;
-        unsafe { (*q_smem.add(e)).write(*q_head.add((query_base + row) * DH + dh)) };
-        e += BLOCK_THREADS;
+    // ── Load Q tile (2 vectorized 128-bit loads per thread) ─────────────────────
+    // Thread tid handles 2 chunks of 8 consecutive u16s (one chunk per BR half):
+    //   chunk_a: Q[(query_base + tid/16), (tid%16)*8 .. +7]  (rows 0..7)
+    //   chunk_b: Q[(query_base + (tid+BLOCK_THREADS)/16), ((tid+BLOCK_THREADS)%16)*8 .. +7] (rows 8..15)
+    // Address is always 16-byte aligned: col = (tid%16)*8 u16 = (tid%16)*16 bytes.
+    {
+        let row_a = tid >> 4;
+        let col_a = (tid & 15) << 3;
+        let v4a = unsafe { ld_global_v4(q_head.add((query_base + row_a) * DH + col_a) as u64) };
+        unsafe { st_shared_v4(q_smem.add(row_a * DH + col_a) as u64, v4a) };
+
+        let e_b   = tid + BLOCK_THREADS;
+        let row_b = e_b >> 4;
+        let col_b = (e_b & 15) << 3;
+        let v4b = unsafe { ld_global_v4(q_head.add((query_base + row_b) * DH + col_b) as u64) };
+        unsafe { st_shared_v4(q_smem.add(row_b * DH + col_b) as u64, v4b) };
     }
     thread::sync_threads();
 
@@ -252,20 +303,30 @@ pub unsafe fn flash_attn(
     while kv_tile < s_seq / BC {
         let kv_base = kv_tile * BC;
 
-        // Load K tile [BC, DH] and V transposed (all 128 threads cooperate).
-        let mut e = tid;
-        while e < BC * DH {
-            let row = e / DH;
-            let dh  = e % DH;
-            unsafe { (*k_smem.add(e)).write(*k_head.add((kv_base + row) * DH + dh)) };
-            e += BLOCK_THREADS;
+        // ── Load K [BC, DH] — 2 vectorized 128-bit loads per thread ─────────────
+        {
+            let row_a = tid >> 4;
+            let col_a = (tid & 15) << 3;
+            let v4a = unsafe { ld_global_v4(k_head.add((kv_base + row_a) * DH + col_a) as u64) };
+            unsafe { st_shared_v4(k_smem.add(row_a * DH + col_a) as u64, v4a) };
+
+            let e_b   = tid + BLOCK_THREADS;
+            let row_b = e_b >> 4;
+            let col_b = (e_b & 15) << 3;
+            let v4b = unsafe { ld_global_v4(k_head.add((kv_base + row_b) * DH + col_b) as u64) };
+            unsafe { st_shared_v4(k_smem.add(row_b * DH + col_b) as u64, v4b) };
         }
-        let mut e = tid;
-        while e < BC * DH {
-            let bc = e / DH;
-            let dh = e % DH;
-            unsafe { (*vt_smem.add(dh * BC + bc)).write(*v_head.add((kv_base + bc) * DH + dh)) };
-            e += BLOCK_THREADS;
+        // ── Load V^T into V_T_SMEM [DH, BC] — scalar scatter (transpose on load) ──
+        // V_T_SMEM[dh, bc] = V[bc, dh]. Scalar loop; vectorized scatter to transposed
+        // layout causes 32-way smem bank conflicts (stride BC=32 bytes) — not worth it.
+        {
+            let mut e = tid;
+            while e < BC * DH {
+                let bc = e / DH;
+                let dh = e % DH;
+                unsafe { (*vt_smem.add(dh * BC + bc)).write(*v_head.add((kv_base + bc) * DH + dh)) };
+                e += BLOCK_THREADS;
+            }
         }
         thread::sync_threads();
 
@@ -357,18 +418,16 @@ pub unsafe fn flash_attn(
             ]
         };
 
-        // Warp w handles V_T n-tiles t = [t_base, t_base + VTILES_PER_WARP).
+        // Warp w handles V n-tiles t = [t_base, t_base + VTILES_PER_WARP).
         // o_g[tt*2+r] accumulates O[grp, dh_base+tt*8+l2*2+r]; tt = t - t_base ∈ [0,4).
-        // B-fragment from V_T_smem [DH, BC] using ldmatrix.x2 (no transpose — already col-major).
-        // Lane l provides V_T_smem[(t*8 + (l&7))*BC + (l&8)]:
-        //   lanes 0-7  → matrix 0 row (l&7) = V_T[t*8+l, 0..7]    (k=0..7)
-        //   lanes 8-15 → matrix 1 row (l&7) = V_T[t*8+(l-8), 8..15] (k=8..15)
-        //   lanes 16-31 → ignored (addr still valid: same rows, don't care half)
+        // B-fragment from V_T_SMEM [DH, BC] col-major: V_T[dh, bc] = V[bc, dh].
+        // Lane l provides column (l&7) of B sub-tile, rows start at (l&8):
+        //   vt_addr = V_T_SMEM[(t*8 + l&7)*BC + (l&8)] = V[l&8..l&8+7, t*8+l&7].
         let vtsp = addr_of!(V_T_SMEM) as *const u16;
-        let vt_lane_koff = lane & 8;  // 0 or 8 — selects k-half, constant per lane
+        let vt_lane_koff = lane & 8;  // 0 for lanes 0-7, 8 for lanes 8-15
         let mut t = t_base;
         while t < t_base + VTILES_PER_WARP {
-            let tt = t - t_base;   // 0..VTILES_PER_WARP
+            let tt = t - t_base;
             let vt_addr = unsafe { vtsp.add((t * 8 + (lane & 7)) * BC + vt_lane_koff) as u64 };
             let [b0, b1] = unsafe { ldmatrix_b2(vt_addr) };
             let d = unsafe { mma_f16(pa, [b0, b1], [0.0f32; 4]) };
