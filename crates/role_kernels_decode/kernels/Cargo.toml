@@ -1,0 +1,11 @@
+[package]
+name = "role_kernels_decode_kernels"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+cuda_std = { path = "../../cuda_std" }

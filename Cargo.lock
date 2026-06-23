@@ -1768,6 +1768,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c6a884d2998352bb4daf0183589aec883f16a6da1f4dde84d8e2e9a5409a1ce"
 
 [[package]]
+name = "role_kernels_decode"
+version = "0.1.0"
+dependencies = [
+ "cuda_builder",
+ "cust",
+ "haiku_san",
+ "log",
+ "ndarray",
+ "ndarray-rand",
+]
+
+[[package]]
+name = "role_kernels_decode_kernels"
+version = "0.1.0"
+dependencies = [
+ "cuda_std",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
