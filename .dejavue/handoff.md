@@ -43,16 +43,18 @@ H=32: ~5.6 TFLOP/s (was 4.1 TFLOP/s for H=1 in v4 due to L2 cache benefit).
   because BR=BC=16, DH=128 → row stride = 256 bytes, all 8-u16 chunks are 16-byte aligned.
 
 ## Next Steps (attention arc, post-v7)
-1) **cp.async pipelining** — overlap K/V global load with QK^T compute using
-   `cp.async.cg` + `cp.async.wait_group`. L2 for 2048×2048 is ~2 MB (K+V);
-   smem double-buffering requires ~24 KB (2×12 KB). May improve if not already L2-resident
-   (or reduce latency variance). Tradeoff: adds smem pressure (conflicts with Br=32).
-2) **Larger Br=32** — 8 warps, 2× query rows per block (BLOCK_THREADS=256).
-   Smem rises to 3×8 KB = 24 KB (still 2 blocks/SM). Better device utilization if
-   KV width (S) is large. Risk: more ILP per thread, register pressure if hitting ceiling.
-3) **Warp-specialized QK^T** — 2 warps QK^T, 4 warps PV. Requires shared softmax via smem
-   (extra 4 KB per block). Allows QK^T to use different tile shapes (m=16/32, n=16).
-   Complexity: sync points, smem coordination.
+**cp.async pipelining** — TESTED, NOT BENEFICIAL. K/V loads are not the bottleneck; the
+FlashAttention load/compute pattern already has good smem locality. Issuing async K[i+1]
+while computing with K[i] requires careful sync (to avoid reading partially overwritten K_SMEM),
+and loading V[i+1] early adds extra work per iteration. Net result: 20% slower (4.5→5.3 TFLOP/s).
+Decision: load remains synchronous for simplicity and current performance.
+
+1) **Larger Br=32** — 8 warps, 2× query rows per block (BLOCK_THREADS=256).
+   Smem rises to 3×8 KB = 24 KB (still 2 blocks/SM). Better device utilization for
+   larger S. Requires careful register allocation (currently 56 regs; room exists).
+2) **Warp-specialized QK^T** — 2 warps compute S, 4 compute PV. Allows QK^T to use
+   different tile shapes (m=32 or m=16, n=16) or higher throughput on K dimension.
+   Requires shared softmax via smem (~4 KB). Trade: complexity vs throughput.
 
 ## GEMV arc (previous, uncommitted)
 GEMV edits were NOT committed (v3 Q4_K, Q6_K warp, bench rows). If resuming GEMV: see `.dejavue/state.md` and `.dejavue/decisions.md` — all context is there.
