@@ -1,23 +1,22 @@
 # Handoff
 
-Updated: 2026-06-22T23:30:00-05:00
+Updated: 2026-06-23T02:00:00-05:00
 
 ## Summary
-Flash attention arc. v6 committed on main.
+Flash attention arc. v7 committed on main — V_T_SMEM swizzle complete.
 
-**v6 results (5070 Ti, Dh=128, f16):**
+**v7 results (5070 Ti, Dh=128, f16):** V_T_SMEM XOR swizzle (phase-8) eliminates 8-way bank conflicts.
 - 512×512  H=1:  0.055 ms, 2.4 TFLOP/s
-- 1024×1024 H=1: 0.163 ms, 3.3 TFLOP/s
-- 2048×2048 H=1: 0.422 ms, 5.1 TFLOP/s  (+24% vs v5 4.1)
-- 512×512  H=32: 0.765 ms, 5.6 TFLOP/s
-- 1024×1024 H=32: 2.965 ms, 5.8 TFLOP/s
-- 2048×2048 H=32: 11.783 ms, 5.8 TFLOP/s
-- L2-rel ~3.5e-4 (f16 quantization noise; algorithm correct)
+- 1024×1024 H=1: 0.159 ms, 3.4 TFLOP/s
+- 2048×2048 H=1: 0.404 ms, 5.3 TFLOP/s  (+4% vs v6 5.1)
+- 512×512  H=32: 0.704 ms, 6.1 TFLOP/s
+- 1024×1024 H=32: 2.722 ms, 6.3 TFLOP/s
+- 2048×2048 H=32: 10.800 ms, 6.4 TFLOP/s  (+10% vs v6 5.8)
+- L2-rel ~3.4e-4 (f16 quantization noise; algorithm correct)
 
-**v6 changes:** Vectorized Q and K tile loads (Q_SMEM, K_SMEM) using 128-bit global
-loads (`ld.global.v4.b32`) and 128-bit smem stores (`st.shared.v4.b32`). Each thread
-does 2 vectorized loads/stores per tile (covering 8 u16 per load), replacing 16-iteration
-scalar while-loops. V load unchanged (V_T_SMEM scalar scatter; see V bank-conflict note).
+**v7 changes:** Phase-8 XOR swizzle on V_T_SMEM: `bc_swizzled = bc ^ (((dh >> 3) & 1) * 8)`.
+Applied to both V load scatter and ldmatrix read. Swizzle by multiples of 8 preserves
+ldmatrix 16-byte alignment. Eliminates 8-way bank conflict previously accepted.
 
 **V bank-conflict analysis (attempted but reverted):**
 - V_T_SMEM[DH, BC] with bc-major vectorized scatter: stride BC*2=32 bytes → all 32 warp
@@ -43,15 +42,17 @@ H=32: ~5.6 TFLOP/s (was 4.1 TFLOP/s for H=1 in v4 due to L2 cache benefit).
 - ld_global_v4 / st_shared_v4: require 16-byte aligned addresses. Q/K tiles have this
   because BR=BC=16, DH=128 → row stride = 256 bytes, all 8-u16 chunks are 16-byte aligned.
 
-## Next Steps (attention arc)
+## Next Steps (attention arc, post-v7)
 1) **cp.async pipelining** — overlap K/V global load with QK^T compute using
    `cp.async.cg` + `cp.async.wait_group`. L2 for 2048×2048 is ~2 MB (K+V);
-   smem double-buffering requires ~24 KB (2×12 KB). May help if not already L2-resident.
-2) **Larger Br** — Br=32 with 8 warps (BR=32, NWARPS=8, BLOCK_THREADS=256).
-   Would need 3×8 KB = 24 KB smem (still 2 blocks/SM at 48 KB), but 2× more rows/block.
-3) **V smem swizzle** — swizzle V_T_SMEM addressing to eliminate 8-way bank conflicts.
-   XOR swizzle: `smem_offset ^= (bc >> 3) << 3` on both store and ldmatrix address.
-4) **Warp-specialized QK^T** — only 2 warps do QK^T, 4 do PV (with shared softmax via smem).
+   smem double-buffering requires ~24 KB (2×12 KB). May improve if not already L2-resident
+   (or reduce latency variance). Tradeoff: adds smem pressure (conflicts with Br=32).
+2) **Larger Br=32** — 8 warps, 2× query rows per block (BLOCK_THREADS=256).
+   Smem rises to 3×8 KB = 24 KB (still 2 blocks/SM). Better device utilization if
+   KV width (S) is large. Risk: more ILP per thread, register pressure if hitting ceiling.
+3) **Warp-specialized QK^T** — 2 warps QK^T, 4 warps PV. Requires shared softmax via smem
+   (extra 4 KB per block). Allows QK^T to use different tile shapes (m=16/32, n=16).
+   Complexity: sync points, smem coordination.
 
 ## GEMV arc (previous, uncommitted)
 GEMV edits were NOT committed (v3 Q4_K, Q6_K warp, bench rows). If resuming GEMV: see `.dejavue/state.md` and `.dejavue/decisions.md` — all context is there.
