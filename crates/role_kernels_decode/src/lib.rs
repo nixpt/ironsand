@@ -105,7 +105,7 @@ pub fn launch_role_rms_norm_single(
         cust::launch!(
             func<<<grid_size, BLOCK_SIZE, 0, stream>>>(
                 input.as_device_ptr(),
-                output.as_device_mut_ptr(),
+                output.as_device_ptr(),
                 hidden_dim,
                 eps,
             )
@@ -135,7 +135,7 @@ impl KernelRegistry {
     /// Load all decode-role kernels from PTX
     pub fn load(device: &cust::device::Device) -> Result<Self, Box<dyn Error>> {
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
-        let module = Module::load_from_ptx(ptx, device)?;
+        let module = Module::from_ptx(ptx, &[])?;
 
         Ok(KernelRegistry { module })
     }
