@@ -232,14 +232,14 @@ impl CodegenCx<'_, '_> {
     }
 }
 
-impl<'ll, 'tcx> DebugInfoCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
-    fn create_function_debug_context(
+impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
+    pub fn create_function_debug_context(
         &self,
         instance: Instance<'tcx>,
         fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
-        llfn: Self::Function,
+        llfn: &'ll Value,
         mir: &mir::Body<'tcx>,
-    ) -> Option<FunctionDebugContext<'tcx, Self::DIScope, Self::DILocation>> {
+    ) -> Option<FunctionDebugContext<'tcx, &'ll DIScope, &'ll llvm::debuginfo::DILocation>> {
         if self.sess().opts.debuginfo == DebugInfo::None {
             return None;
         }
@@ -260,6 +260,20 @@ impl<'ll, 'tcx> DebugInfoCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
         compute_mir_scopes(self, instance, mir, &mut fn_debug_context);
 
         Some(fn_debug_context)
+    }
+}
+
+impl<'ll, 'tcx> DebugInfoCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
+    fn dbg_create_lexical_block(&self, _pos: BytePos, parent_scope: Self::DIScope) -> Self::DIScope {
+        parent_scope
+    }
+
+    fn dbg_location_clone_with_discriminator(
+        &self,
+        _loc: Self::DILocation,
+        _discriminator: u32,
+    ) -> Option<Self::DILocation> {
+        None
     }
 
     fn dbg_scope_fn(

@@ -1,4 +1,4 @@
-use rustc_codegen_ssa::RetagInfo;
+
 use rustc_abi as abi;
 use rustc_abi::{self, BackendRepr, Float, HasDataLayout, Primitive, WrappingRange};
 use rustc_codegen_ssa::errors::InvalidMonomorphization;
@@ -240,16 +240,15 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
         instance: ty::Instance<'tcx>,
         args: &[OperandRef<'tcx, &'ll Value>],
         result_layout: ty::layout::TyAndLayout<'tcx>,
-        result_place: Option<rustc_codegen_ssa::mir::PlaceValue<&'ll Value>>,
+        result_place: Option<rustc_codegen_ssa::mir::place::PlaceValue<&'ll Value>>,
         span: Span,
     ) -> rustc_codegen_ssa::mir::IntrinsicResult<'tcx, &'ll Value> {
-        let result = result_place.map(|p| PlaceRef {
-            val: p,
-            layout: result_layout,
-        }).unwrap_or_else(|| {
-            PlaceRef { val: PlaceValue::new_sized(self.cx.const_undef(self.backend_type(result_layout)), result_layout.align), layout: result_layout }
-        });
-
+        // Use provided place, or a temporary alloca when the caller wants an SSA operand.
+        let (result, used_temp_alloca) = if let Some(place_val) = result_place {
+            (PlaceRef { val: place_val, layout: result_layout }, false)
+        } else {
+            (PlaceRef::alloca(self, result_layout), !result_layout.is_zst())
+        };
 
         let tcx = self.tcx;
         let callee_ty = instance.ty(tcx, self.typing_env());
@@ -434,7 +433,11 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                         let selected =
                             OperandValue::Ref(PlaceValue::new_sized(ptr, true_val.align));
                         selected.store(self, result);
-                        return IntrinsicResult::WroteIntoPlace;
+                        return if used_temp_alloca {
+                            IntrinsicResult::Operand(self.load_operand(result).val)
+                        } else {
+                            IntrinsicResult::WroteIntoPlace
+                        };
                     }
                     (OperandValue::Immediate(_), OperandValue::Immediate(_))
                     | (OperandValue::Pair(_, _), OperandValue::Pair(_, _)) => {
@@ -524,7 +527,11 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                 if !result.layout.is_zst() {
                     self.store_to_place(load, result.val);
                 }
-                return IntrinsicResult::WroteIntoPlace;
+                return if used_temp_alloca {
+                    IntrinsicResult::Operand(self.load_operand(result).val)
+                } else {
+                    IntrinsicResult::WroteIntoPlace
+                };
             }
             sym::volatile_store => {
                 let dst = args[0].deref(self.cx());
@@ -770,7 +777,11 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                 .unwrap_or_else(|| bug!("failed to generate inline asm call for `black_box`"));
 
                 // We have copied the value to `result` already.
-                return IntrinsicResult::WroteIntoPlace;
+                return if used_temp_alloca {
+                    IntrinsicResult::Operand(self.load_operand(result).val)
+                } else {
+                    IntrinsicResult::WroteIntoPlace
+                };
             }
 
             // is this even supported by nvvm? i did not find a definitive answer
@@ -785,7 +796,7 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                         intrinsic.name,
                     );
                 }
-                return Err(rustc_middle::ty::Instance::new_raw(
+                return IntrinsicResult::Fallback(rustc_middle::ty::Instance::new_raw(
                     instance.def_id(),
                     instance.args,
                 ));
@@ -803,7 +814,11 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                     .store(self, result);
             }
         }
-        Ok(())
+        if used_temp_alloca {
+            IntrinsicResult::Operand(self.load_operand(result).val)
+        } else {
+            IntrinsicResult::WroteIntoPlace
+        }
     }
 
     fn codegen_llvm_intrinsic_call(
@@ -821,7 +836,7 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
             }
             _ => unreachable!(),
         };
-        assert!(!fn_sig.c_variadic);
+        assert!(!fn_sig.c_variadic());
 
         let ret_layout = self.layout_of(fn_sig.output());
         let llreturn_ty = if ret_layout.is_zst() {
@@ -894,7 +909,7 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
             self.apply_attrs_to_cleanup_callsite(llret);
         }
 
-        IntrinsicResult::WroteIntoPlace
+        llret
     }
 
     fn abort(&mut self) {
@@ -922,9 +937,9 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
         self.const_i32(0)
     }
 
-    fn va_start(&mut self, va_list: &'ll Value) -> &'ll Value {
+    fn va_start(&mut self, va_list: &'ll Value) {
         trace!("Generate va_start `{:?}`", va_list);
-        self.call_intrinsic("llvm.va.start", &[va_list])
+        self.call_intrinsic("llvm.va.start", &[va_list]);
     }
 
 

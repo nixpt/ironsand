@@ -58,17 +58,16 @@ use rustc_codegen_ssa::{
     CompiledModule, CompiledModules, CrateInfo, ModuleCodegen, TargetConfig,
     back::{
         lto::{SerializedModule, ThinModule},
-        write::{CodegenContext, FatLtoInput, ModuleConfig, OngoingCodegen},
+        write::{CodegenContext, FatLtoInput, ModuleConfig, OngoingCodegen, ThinLtoInput},
     },
     traits::{CodegenBackend, ExtraBackendMethods, WriteBackendMethods},
 };
-use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::profiling::SelfProfilerRef;
 use rustc_errors::DiagCtxtHandle;
 use rustc_metadata::creader::MetadataLoaderDyn;
 use rustc_middle::util::Providers;
 use rustc_middle::{
-    dep_graph::{WorkProduct, WorkProductId, WorkProductMap},
+    dep_graph::{WorkProduct, WorkProductMap},
     ty::TyCtxt,
 };
 use rustc_session::{
@@ -288,9 +287,18 @@ impl WriteBackendMethods for NvvmCodegenBackend {
         _each_linked_rlib_for_lto: &[PathBuf],
         modules: Vec<rustc_codegen_ssa::back::write::ThinLtoInput<Self>>,
     ) -> (Vec<ThinModule<Self>>, Vec<WorkProduct>) {
-        // Convert ThinLtoInput to the format lto::run_thin expects
-        let modules_vec = modules.into_iter().map(|m| (m.name().to_string(), m.source)).collect();
-        let cached_modules = Vec::new();
+        // Partition ThinLtoInput enum variants into live vs cached modules.
+        let mut modules_vec = Vec::new();
+        let mut cached_modules = Vec::new();
+        for m in modules {
+            match m {
+                ThinLtoInput::Red { name, buffer } => modules_vec.push((name, buffer)),
+                ThinLtoInput::Green { wp, bitcode_path } => {
+                    let sm = SerializedModule::from_file(&bitcode_path);
+                    cached_modules.push((sm, wp));
+                }
+            }
+        }
         lto::run_thin(cgcx, modules_vec, cached_modules)
     }
 
@@ -333,6 +341,8 @@ impl WriteBackendMethods for NvvmCodegenBackend {
 }
 
 impl ExtraBackendMethods for NvvmCodegenBackend {
+    type Module = LlvmMod;
+
     fn codegen_allocator(
         &self,
         tcx: TyCtxt<'_>,

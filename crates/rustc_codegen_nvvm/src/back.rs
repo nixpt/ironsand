@@ -233,6 +233,7 @@ pub(crate) unsafe fn codegen(
         name: mod_name,
         kind: module.kind,
         object: Some(out),
+        global_asm_object: None,
         dwarf_object: None,
         bytecode: None,
         assembly: None,
@@ -252,9 +253,8 @@ pub fn compile_codegen_unit(tcx: TyCtxt<'_>, cgu_name: Symbol) -> (ModuleCodegen
     let (module, _) = tcx.dep_graph.with_task(
         dep_node,
         tcx,
-        cgu_name,
-        module_codegen,
-        Some(dep_graph::hash_result),
+        || module_codegen(tcx, cgu_name),
+        None,
     );
 
     fn module_codegen(tcx: TyCtxt<'_>, cgu_name: Symbol) -> ModuleCodegen<LlvmMod> {

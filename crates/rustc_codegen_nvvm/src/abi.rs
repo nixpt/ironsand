@@ -219,7 +219,7 @@ impl LlvmType for Reg {
                 128 => cx.type_f128(),
                 _ => bug!("unsupported float: {:?}", self),
             },
-            RegKind::Vector => cx.type_vector(cx.type_i8(), self.size.bytes()),
+            RegKind::Vector { .. } => cx.type_vector(cx.type_i8(), self.size.bytes()),
         }
     }
 }
@@ -256,7 +256,7 @@ impl LlvmType for CastTarget {
 
         // Simplify to a single unit or an array if there's no prefix.
         // This produces the same layout, but using a simpler type.
-        if self.prefix.iter().all(|x| x.is_none()) {
+        if self.prefix.is_empty() {
             // We can't do this if is_consecutive is set and the unit would get
             // split on the target. Currently, this is only relevant for i128
             // registers.
@@ -271,7 +271,7 @@ impl LlvmType for CastTarget {
         let prefix_args = self
             .prefix
             .iter()
-            .flat_map(|option_reg| option_reg.map(|reg| reg.llvm_type(cx)));
+            .map(|reg| reg.llvm_type(cx));
         let rest_args = (0..rest_count).map(|_| rest_ll_unit);
         let args: Vec<_> = prefix_args.chain(rest_args).collect();
         cx.type_struct(&args, false)

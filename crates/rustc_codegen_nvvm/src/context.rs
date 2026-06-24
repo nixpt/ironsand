@@ -784,7 +784,7 @@ impl<'tcx> FnAbiOfHelpers<'tcx> for CodegenCx<'_, 'tcx> {
         fn_abi_request: FnAbiRequest<'tcx>,
     ) -> ! {
         match err {
-            FnAbiError::Layout(LayoutError::SizeOverflow(_) | LayoutError::Cycle(_)) => {
+            FnAbiError::Layout(LayoutError::SizeOverflow(_) | LayoutError::Unknown(_)) => {
                 self.tcx.dcx().emit_fatal(Spanned { span, node: err });
             }
             _ => match fn_abi_request {

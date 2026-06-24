@@ -503,7 +503,7 @@ impl<'ll, 'tcx, 'a> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         }
     }
 
-    fn alloca_with_ty(&mut self, layout: TyAndLayout<'tcx, Ty<'tcx>>) -> &'ll Value {
+    fn alloca_with_ty(&mut self, layout: TyAndLayout<'tcx>) -> &'ll Value {
         self.alloca(layout.size, layout.align.abi)
     }
 

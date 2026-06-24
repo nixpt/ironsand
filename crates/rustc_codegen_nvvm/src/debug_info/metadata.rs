@@ -757,7 +757,6 @@ pub(crate) fn build_compile_unit_di_node<'ll, 'tcx>(
             tcx.sess.split_debuginfo(),
             tcx.sess.opts.unstable_opts.split_dwarf_kind,
             codegen_unit_name,
-            None,
         ) {
         // We get a path relative to the working directory from split_dwarf_path
         Some(

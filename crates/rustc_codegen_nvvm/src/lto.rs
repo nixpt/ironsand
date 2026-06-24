@@ -69,29 +69,27 @@ impl Drop for ThinData {
 
 pub(crate) fn run_thin(
     _cgcx: &CodegenContext,
-    modules: Vec<(String, ModuleBuffer)>,
+    modules: Vec<(String, SerializedModule<ModuleBuffer>)>,
     cached_modules: Vec<(SerializedModule<ModuleBuffer>, WorkProduct)>,
 ) -> (Vec<ThinModule<NvvmCodegenBackend>>, Vec<WorkProduct>) {
     debug!("Running thin LTO");
-    let mut thin_buffers = Vec::with_capacity(modules.len());
+    let mut all_modules: Vec<SerializedModule<ModuleBuffer>> =
+        Vec::with_capacity(modules.len() + cached_modules.len());
     let mut module_names = Vec::with_capacity(modules.len() + cached_modules.len());
 
     for (name, buf) in modules {
-        thin_buffers.push(buf);
+        all_modules.push(buf);
         module_names.push(CString::new(name).unwrap());
     }
 
-    let mut serialized_modules = Vec::with_capacity(cached_modules.len());
     for (sm, wp) in cached_modules {
-        let _ = sm.data();
-        serialized_modules.push(sm);
+        all_modules.push(sm);
         module_names.push(CString::new(wp.cgu_name).unwrap());
     }
 
     let shared = Arc::new(ThinShared {
         data: (),
-        thin_buffers,
-        serialized_modules,
+        modules: all_modules,
         module_names,
     });
 

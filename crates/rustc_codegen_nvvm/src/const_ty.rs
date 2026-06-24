@@ -7,8 +7,7 @@ use rustc_abi::{AddressSpace, HasDataLayout};
 use rustc_ast::Mutability;
 use rustc_codegen_ssa::common::TypeKind;
 use rustc_codegen_ssa::traits::*;
-use rustc_data_structures::stable_hash::StableHasher;
-use rustc_hashes::Hash128;
+
 use rustc_middle::bug;
 use rustc_middle::mir::interpret::{GlobalAlloc, Scalar};
 use rustc_middle::ty::layout::LayoutOf;
@@ -177,14 +176,11 @@ impl<'ll, 'tcx> ConstCodegenMethods for CodegenCx<'ll, 'tcx> {
                             };
                             if !self.sess().fewer_names() && llvm::get_value_name(value).is_empty()
                             {
-                                let hash = self.tcx.with_stable_hashing_context(|mut hcx| {
-                                    let mut hasher = StableHasher::new();
-                                    inner_alloc.hash_stable(&mut hcx, &mut hasher);
-                                    hasher.finish::<Hash128>()
-                                });
+                                // Name the anonymous global by its address for debug purposes.
+                                let addr = inner_alloc as *const _ as usize;
                                 llvm::set_value_name(
                                     value,
-                                    format!("alloc_{hash:032x}").as_bytes(),
+                                    format!("alloc_{addr:016x}").as_bytes(),
                                 );
                             }
                             (value, AddressSpace::ZERO)

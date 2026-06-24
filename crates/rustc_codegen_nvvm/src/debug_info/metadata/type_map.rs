@@ -4,6 +4,7 @@ use rustc_abi::{Align, Size, VariantIdx};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::stable_hash::{StableHash, StableHasher};
+use rustc_macros::StableHash;
 use rustc_middle::bug;
 use rustc_middle::ty::{self, ExistentialTraitRef, Ty, TyCtxt, Unnormalized};
 
@@ -15,6 +16,7 @@ use crate::llvm;
 use crate::llvm::debuginfo::{DIFlags, DIScope, DIType};
 
 mod private {
+    use rustc_macros::StableHash;
 
     // This type cannot be constructed outside of this module because
     // it has a private field. We make use of this in order to prevent
@@ -100,7 +102,7 @@ impl<'tcx> UniqueTypeId<'tcx> {
     pub fn generate_unique_id_string(self, tcx: TyCtxt<'tcx>) -> String {
         let mut hasher = StableHasher::new();
         tcx.with_stable_hashing_context(|mut hcx| {
-            hcx.while_hashing_spans(false, |hcx| self.hash_stable(hcx, &mut hasher))
+            hcx.while_hashing_spans(false, |hcx| self.stable_hash(hcx, &mut hasher))
         });
         hasher.finish::<Fingerprint>().to_hex()
     }
