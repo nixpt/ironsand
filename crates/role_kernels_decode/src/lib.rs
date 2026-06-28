@@ -40,10 +40,12 @@
 //! - Memory coalescing patterns
 //! - Expected performance gains
 
-use std::error::Error;
+use cust::kernel::KernelDescriptor;
+use cust::kernel_descriptor;
+use cust::memory::{DeviceBuffer, DevicePointer};
 use cust::module::Module;
 use cust::stream::Stream;
-use cust::memory::DeviceBuffer;
+use std::error::Error;
 
 pub mod cpu_reference;
 
@@ -91,6 +93,16 @@ pub const OP_FLASH_ATTN_SINGLE: u32 = 32;
 ///     n as u32,
 /// )?;
 /// ```
+kernel_descriptor! {
+    pub unsafe fn role_gemv_decode_single(
+        matrix: DevicePointer<f32>,
+        vector: DevicePointer<f32>,
+        output: DevicePointer<f32>,
+        m: u32,
+        n: u32,
+    );
+}
+
 pub fn launch_role_gemv_decode_single(
     module: &Module,
     stream: &Stream,
@@ -100,7 +112,7 @@ pub fn launch_role_gemv_decode_single(
     m: u32,
     n: u32,
 ) -> Result<(), Box<dyn Error>> {
-    let func = module.get_function("role_gemv_decode_single")?;
+    let kernel = role_gemv_decode_single::load(module)?;
 
     // Grid: m blocks (one block per output row)
     // Block: 256 threads (each computes partial dot product)
@@ -108,14 +120,15 @@ pub fn launch_role_gemv_decode_single(
     let grid_size = m;
 
     unsafe {
-        cust::launch!(
-            func<<<grid_size, BLOCK_SIZE, 0, stream>>>(
+        kernel.launch(
+            grid_size, BLOCK_SIZE, 0, stream,
+            (
                 matrix.as_device_ptr(),
                 vector.as_device_ptr(),
                 output.as_device_ptr(),
                 m,
                 n,
-            )
+            ),
         )?;
     }
 
@@ -154,6 +167,15 @@ pub fn launch_role_gemv_decode_single(
 ///     1e-6,
 /// )?;
 /// ```
+kernel_descriptor! {
+    pub unsafe fn role_rms_norm_single(
+        input: DevicePointer<f32>,
+        output: DevicePointer<f32>,
+        hidden_dim: u32,
+        eps: f32,
+    );
+}
+
 pub fn launch_role_rms_norm_single(
     module: &Module,
     stream: &Stream,
@@ -162,7 +184,7 @@ pub fn launch_role_rms_norm_single(
     hidden_dim: u32,
     eps: f32,
 ) -> Result<(), Box<dyn Error>> {
-    let func = module.get_function("role_rms_norm_single")?;
+    let kernel = role_rms_norm_single::load(module)?;
 
     // Block size: 256 threads (one thread per ~(hidden_dim/256) elements)
     // This allows warp-level reductions to work efficiently
@@ -170,13 +192,14 @@ pub fn launch_role_rms_norm_single(
     let grid_size = 1; // Single block per kernel call (fine for 1D RMS norm)
 
     unsafe {
-        cust::launch!(
-            func<<<grid_size, BLOCK_SIZE, 0, stream>>>(
+        kernel.launch(
+            grid_size, BLOCK_SIZE, 0, stream,
+            (
                 input.as_device_ptr(),
                 output.as_device_ptr(),
                 hidden_dim,
                 eps,
-            )
+            ),
         )?;
     }
 
@@ -224,6 +247,17 @@ pub fn launch_role_rms_norm_single(
 ///     seq_len as u32,
 /// )?;
 /// ```
+kernel_descriptor! {
+    pub unsafe fn role_flash_attn_single(
+        query: DevicePointer<f32>,
+        k_cache: DevicePointer<f32>,
+        v_cache: DevicePointer<f32>,
+        output: DevicePointer<f32>,
+        head_dim: u32,
+        seq_len: u32,
+    );
+}
+
 pub fn launch_role_flash_attn_single(
     module: &Module,
     stream: &Stream,
@@ -234,7 +268,7 @@ pub fn launch_role_flash_attn_single(
     head_dim: u32,
     seq_len: u32,
 ) -> Result<(), Box<dyn Error>> {
-    let func = module.get_function("role_flash_attn_single")?;
+    let kernel = role_flash_attn_single::load(module)?;
 
     // Block: 32 threads (warp, good for attention operations)
     // Grid: 1 (single query, single output)
@@ -242,15 +276,16 @@ pub fn launch_role_flash_attn_single(
     let grid_size = 1;
 
     unsafe {
-        cust::launch!(
-            func<<<grid_size, BLOCK_SIZE, 0, stream>>>(
+        kernel.launch(
+            grid_size, BLOCK_SIZE, 0, stream,
+            (
                 query.as_device_ptr(),
                 k_cache.as_device_ptr(),
                 v_cache.as_device_ptr(),
                 output.as_device_ptr(),
                 head_dim,
                 seq_len,
-            )
+            ),
         )?;
     }
 
@@ -302,7 +337,12 @@ mod tests {
         let expected = vec![0.3651, 0.7303, 1.0954, 1.4606];
 
         for (out, exp) in output.iter().zip(expected.iter()) {
-            assert!((out - exp).abs() < 1e-3, "Output mismatch: {} vs {}", out, exp);
+            assert!(
+                (out - exp).abs() < 1e-3,
+                "Output mismatch: {} vs {}",
+                out,
+                exp
+            );
         }
     }
 }
