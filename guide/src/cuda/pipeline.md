@@ -36,31 +36,61 @@ into a final format called SASS which is register allocated and executed on the 
 
 The ironsand project replaces NVCC with a custom rustc backend. The pipeline looks like this:
 
-```
-+---------------------------------------------------------------------+
-|                         ironsand Pipeline                           |
-|                                                                     |
-|  Host code (.rs)           GPU kernel code (.rs)                    |
-|       |                          |                                  |
-|       |                   rustc_codegen_nvvm                        |
-|       |                   (custom rustc backend)                    |
-|       |                          |                                  |
-|       |                     NVVM IR (.bc)                           |
-|       |                          |                                  |
-|       |                      libNVVM                                |
-|       |                          |                                  |
-|       |                      PTX (.ptx)  <-- embedded via           |
-|       |                          |           include_str!()         |
-|       v                          v                                  |
-|  Host binary ---- cust ------> Driver API                           |
-|                  (Rust)         (CUDA)                              |
-|                                  |                                  |
-|                              JIT compile                            |
-|                                  |                                  |
-|                              SASS (GPU machine code)                |
-|                                  |                                  |
-|                              GPU execution                          |
-+---------------------------------------------------------------------+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        The ironsand pipeline                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   Host compile-time                    Device compile-time                  │
+│   ────────────────                     ──────────────────                   │
+│                                                                             │
+│        ┌──────────────┐                      ┌──────────────┐               │
+│        │ Host Rust    │                      │ GPU kernel   │               │
+│        │ code (.rs)   │                      │ Rust (.rs)   │               │
+│        └──────┬───────┘                      └──────┬───────┘               │
+│               │                                     │                       │
+│               │ rustc (host backend)                │ rustc_codegen_nvvm    │
+│               │                                     │ (custom backend)      │
+│               ▼                                     ▼                       │
+│        ┌──────────────┐                      ┌──────────────┐               │
+│        │ Host binary  │<---- include_str!()─│ PTX (.ptx)   │               │
+│        │ (ELF)        │      embeds PTX      │              │               │
+│        └──────┬───────┘                      └──────┬───────┘               │
+│               │                                     │                       │
+│               │                                     ▲                       │
+│               │                              ┌──────┴──────┐                │
+│               │                              │ libNVVM     │                │
+│               │                              │ (NVVM IR    │                │
+│               │                              │  --> PTX)   │                │
+│               │                              └─────────────┘                │
+│               │                                                             │
+│   Runtime     │                                                             │
+│   ───────     ▼                                                             │
+│        ┌──────────────┐                                                     │
+│        │ cust         │  Rust safe wrapper around CUDA Driver API           │
+│        │ (Rust)       │  ├─ Module::from_ptx(PTX)                           │
+│        └──────┬───────┘  ├─ Kernel<'a, Args>::launch(...)                   │
+│               │          └─ Stream, Event, DeviceBuffer                     │
+│               │                                                             │
+│               ▼                                                             │
+│        ┌──────────────┐                                                     │
+│        │ CUDA Driver  │  cuModuleLoad, cuLaunchKernel, cuStreamSynchronize   │
+│        │ API (C)      │                                                     │
+│        └──────┬───────┘                                                     │
+│               │                                                             │
+│               ▼                                                             │
+│        ┌──────────────┐                                                     │
+│        │ JIT compile  │  Driver compiles PTX → SASS (machine code)          │
+│        │ (PTX → SASS) │  at load time for the target GPU architecture        │
+│        └──────┬───────┘                                                     │
+│               │                                                             │
+│               ▼                                                             │
+│        ┌──────────────┐                                                     │
+│        │ GPU Execution│  Warps, threads, shared memory, tensor cores        │
+│        │ (SASS)       │                                                     │
+│        └──────────────┘                                                     │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **`rustc_codegen_nvvm`** is a custom rustc backend that compiles GPU kernel crates to NVVM IR
