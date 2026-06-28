@@ -4,6 +4,44 @@ The [`Kernel<'a, Args>`](../../kernel/struct.Kernel.html) type provides a **comp
 
 This chapter covers everything from basic loading and launching to advanced topics such as occupancy-driven launch configuration and reusing a loaded kernel across multiple CUDA streams.
 
+```text
+ Device code                              Host code
+ ───────────                              ─────────
+
+ #[kernel]                                kernel_descriptor! {
+ pub unsafe fn saxpy(                        pub unsafe fn saxpy(
+     x: *const f32,     ───PTX───▶            x: DevicePointer<f32>,
+     y: *mut f32,                             y: DevicePointer<f32>,
+     a: f32,                                  a: f32,
+     n: u32,                                  n: usize,
+ );                                        ); }
+     │                                          │
+     │    1. Compile to PTX with cuda_builder   │
+     ▼                                          ▼
+ ┌─────────┐                              ┌──────────────┐
+ │ PTX blob│  ◄──── 2. Load at runtime ───│   Module     │
+ └─────────┘                              └──────────────┘
+                                               │
+                                               │ 3. Descriptor::load
+                                               ▼
+                                          ┌──────────────┐
+                                          │ Kernel<Args> │
+                                          └──────────────┘
+                                               │
+                                               │ 4. kernel.launch
+                                               ▼
+                                          ┌──────────────┐
+                                          │   GPU exec   │
+                                          └──────────────┘
+```
+
+The four steps are:
+
+1. **Write** the kernel in Rust with `#[kernel]` and compile it to PTX via `cuda_builder`.
+2. **Load** the PTX blob into a `cust::module::Module` at runtime.
+3. **Describe** the kernel's host-side ABI with `kernel_descriptor!` (or `#[derive(KernelDescriptor)]`) and load a `Kernel<'a, Args>` from the module.
+4. **Launch** with `kernel.launch(grid, block, shared_mem, &stream, args)` — the Rust compiler checks that `args` matches the descriptor's `Args` tuple.
+
 ## Quick recap
 
 If you have not read the [Getting Started](getting_started.html) chapter yet, the typed API can be introduced in three lines:
