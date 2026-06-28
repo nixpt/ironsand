@@ -22,4 +22,5 @@
 
 [Supported Features](features.md)
 [Frequently Asked Questions](faq.md)
+[README — Typed Kernel API Overview](../../README.md)
 
