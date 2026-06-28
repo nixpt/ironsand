@@ -1,0 +1,5 @@
+error: KernelDescriptor requires #[kernel_name = "..."] attribute
+ --> tests/ui/fail_bad_attr_type.rs:5:8
+  |
+5 | struct BadAttrType(f32);
+  |        ^^^^^^^^^^^

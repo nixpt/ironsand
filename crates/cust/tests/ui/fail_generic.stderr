@@ -1,0 +1,5 @@
+error: KernelDescriptor does not support generic structs
+ --> tests/ui/fail_generic.rs:5:8
+  |
+5 | struct Generic<T>(T);
+  |        ^^^^^^^

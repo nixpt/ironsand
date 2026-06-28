@@ -1,0 +1,5 @@
+error: KernelDescriptor requires #[kernel_name = "..."] attribute
+ --> tests/ui/fail_no_attr.rs:4:8
+  |
+4 | struct MissingAttr(f32, usize);
+  |        ^^^^^^^^^^^

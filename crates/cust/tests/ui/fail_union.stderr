@@ -1,0 +1,5 @@
+error: KernelDescriptor can only be derived for structs
+ --> tests/ui/fail_union.rs:5:7
+  |
+5 | union BadUnion {
+  |       ^^^^^^^^
