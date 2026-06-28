@@ -40,7 +40,7 @@ struct Saxpy(DevicePointer<f32>, DevicePointer<f32>, f32, usize);
 let saxpy = Saxpy::load(&module)?;
 ```
 
-## Migrating from `launch!` to `Kernel::launch`
+## Migrating from launch! to Kernel::launch
 
 If you have existing code that uses the raw `launch!` macro and `module.get_function`, the migration is mechanical and usually takes only a few minutes per kernel.
 
