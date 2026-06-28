@@ -93,6 +93,38 @@ Benefits:
 See the [Typed Kernels guide chapter](guide/src/guide/typed_kernels.md) for full details on
 `kernel_descriptor!`, `#[derive(KernelDescriptor)]`, multi-stream reuse, and raw-handle fallback.
 
+### Migrating from `launch!`
+
+If you have existing code using the raw `launch!` macro, the migration is mechanical:
+
+1. **Replace** `module.get_function("name")` with a `kernel_descriptor!` declaration and `Descriptor::load(&module)`.
+2. **Replace** `launch!(func<<<grid, block, 0, stream>>>(a, b, c))` with `kernel.launch(grid, block, 0, &stream, (a, b, c))`.
+3. **Remove** `use cust::launch;`.
+
+**Before**:
+```rust
+let func = module.get_function("increment")?;
+unsafe {
+    launch!(func<<<grids, blocks, 0, stream>>>(ptr, value))?;
+}
+```
+
+**After**:
+```rust
+kernel_descriptor! {
+    pub unsafe fn increment(ptr: DevicePointer<u32>, value: u32);
+}
+
+let increment = increment::load(&module)?;
+unsafe {
+    increment.launch(grids, blocks, 0, &stream, (ptr, value))?;
+}
+```
+
+Device-side slices (`&[T]`) become `(DevicePointer<T>, usize)` pairs on the host. See the
+[Migration guide](guide/src/guide/typed_kernels.md#migrating-from-launch-to-kernellaunch) in the
+Typed Kernels chapter for slice examples, common pitfalls, and gradual-adoption tips.
+
 ## Documentation
 
 The original [Rust CUDA Guide](https://rust-gpu.github.io/rust-cuda/) remains the best reference for
