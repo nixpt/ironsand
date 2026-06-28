@@ -14,39 +14,13 @@
 //! weights `l, l+32, l+64, l+96` per group (coalesced ql/qh reads). 6.5625
 //! bits/weight. Requires `k % 256 == 0`.
 
-use cuda_std::kernel;
-use cuda_std::thread;
-use cuda_std::warp;
 use cuda_std::GpuFloat;
-#[cfg(target_os = "cuda")]
-use core::arch::asm;
+use cuda_std::kernel;
+use cuda_std::quant::{cvt_f16, dp4a, load_u16, warp_sum_f32};
+use cuda_std::thread;
 
 const WARP: u32 = 32;
 const BLK: usize = 210; // bytes per Q6_K super-block
-
-#[cfg(target_os = "cuda")]
-#[inline(always)]
-unsafe fn cvt_f16(bits: u16) -> f32 {
-    let o: f32;
-    unsafe { asm!("cvt.f32.f16 {o}, {i};", o = out(reg32) o, i = in(reg16) bits) };
-    o
-}
-#[cfg(not(target_os = "cuda"))]
-#[inline(always)]
-unsafe fn cvt_f16(_bits: u16) -> f32 {
-    0.0
-}
-
-#[inline(always)]
-unsafe fn warp_sum_f32(mut v: f32) -> f32 {
-    let mut off = WARP / 2;
-    while off >= 1 {
-        let (bits, _) = unsafe { warp::warp_shuffle_xor(u32::MAX, v.to_bits(), off, WARP) };
-        v += f32::from_bits(bits);
-        off >>= 1;
-    }
-    v
-}
 
 /// Per-group inner dot. Each lane owns 4 weights (`l, l+32, l+64, l+96` of the
 /// 128-weight group) and reads 2 ql bytes + 1 qh byte + 4 scale bytes. The 4
@@ -103,14 +77,7 @@ unsafe fn q6k_group_dot(
 /// `k % 256 == 0`; buffers sized as above; launch ≥ `m` warps, block % 32 == 0.
 #[kernel]
 #[allow(improper_ctypes_definitions)]
-pub unsafe fn gemv_q6k_warp(
-    a: &[u8],
-    x: &[f32],
-    y: *mut f32,
-    m: usize,
-    k: usize,
-    beta: f32,
-) {
+pub unsafe fn gemv_q6k_warp(a: &[u8], x: &[f32], y: *mut f32, m: usize, k: usize, beta: f32) {
     let tid = thread::block_dim_x() * thread::block_idx_x() + thread::thread_idx_x();
     let row = (tid / WARP) as usize;
     let l = (tid % WARP) as usize; // 0..32
@@ -133,7 +100,18 @@ pub unsafe fn gemv_q6k_warp(
         // Group 0: weights [gw, gw+128) → ql[0..64], qh[0..32], scales[0..8).
         bacc += unsafe { q6k_group_dot(aptr, bbase, bbase + 128, bbase + 192, l, is, gw, x) };
         // Group 1: weights [gw+128, gw+256) → ql[64..128], qh[32..64], scales[8..16).
-        bacc += unsafe { q6k_group_dot(aptr, bbase + 64, bbase + 160, bbase + 200, l, is, gw + 128, x) };
+        bacc += unsafe {
+            q6k_group_dot(
+                aptr,
+                bbase + 64,
+                bbase + 160,
+                bbase + 200,
+                l,
+                is,
+                gw + 128,
+                x,
+            )
+        };
         acc += d * bacc;
         b += 1;
     }
@@ -169,14 +147,7 @@ pub unsafe fn gemv_q6k_warp(
 /// As [`gemv_q6k_warp`].
 #[kernel]
 #[allow(improper_ctypes_definitions)]
-pub unsafe fn gemv_q6k_fast(
-    a: &[u8],
-    x: &[f32],
-    y: *mut f32,
-    m: usize,
-    k: usize,
-    beta: f32,
-) {
+pub unsafe fn gemv_q6k_fast(a: &[u8], x: &[f32], y: *mut f32, m: usize, k: usize, beta: f32) {
     let tid = thread::block_dim_x() * thread::block_idx_x() + thread::thread_idx_x();
     let row = (tid / WARP) as usize;
     let l = (tid % WARP) as usize;
@@ -203,12 +174,34 @@ pub unsafe fn gemv_q6k_fast(
         // Block b: g0 + g1 → bacc0.
         let mut bacc0 = 0.0f32;
         bacc0 += unsafe { q6k_group_dot(aptr, bbase0, bbase0 + 128, bbase0 + 192, l, is, gw0, x) };
-        bacc0 += unsafe { q6k_group_dot(aptr, bbase0 + 64, bbase0 + 160, bbase0 + 200, l, is, gw0 + 128, x) };
+        bacc0 += unsafe {
+            q6k_group_dot(
+                aptr,
+                bbase0 + 64,
+                bbase0 + 160,
+                bbase0 + 200,
+                l,
+                is,
+                gw0 + 128,
+                x,
+            )
+        };
         // Block b+1: g0 + g1 → bacc1. (Group dots read independently — the compiler
         // is free to reorder the ql/qh/scale loads across both blocks.)
         let mut bacc1 = 0.0f32;
         bacc1 += unsafe { q6k_group_dot(aptr, bbase1, bbase1 + 128, bbase1 + 192, l, is, gw1, x) };
-        bacc1 += unsafe { q6k_group_dot(aptr, bbase1 + 64, bbase1 + 160, bbase1 + 200, l, is, gw1 + 128, x) };
+        bacc1 += unsafe {
+            q6k_group_dot(
+                aptr,
+                bbase1 + 64,
+                bbase1 + 160,
+                bbase1 + 200,
+                l,
+                is,
+                gw1 + 128,
+                x,
+            )
+        };
 
         acc = d0.mul_add(bacc0, acc);
         acc = d1.mul_add(bacc1, acc);
@@ -221,7 +214,18 @@ pub unsafe fn gemv_q6k_fast(
         let gw = b * 256;
         let mut bacc = 0.0f32;
         bacc += unsafe { q6k_group_dot(aptr, bbase, bbase + 128, bbase + 192, l, is, gw, x) };
-        bacc += unsafe { q6k_group_dot(aptr, bbase + 64, bbase + 160, bbase + 200, l, is, gw + 128, x) };
+        bacc += unsafe {
+            q6k_group_dot(
+                aptr,
+                bbase + 64,
+                bbase + 160,
+                bbase + 200,
+                l,
+                is,
+                gw + 128,
+                x,
+            )
+        };
         acc = d.mul_add(bacc, acc);
     }
 
@@ -230,30 +234,6 @@ pub unsafe fn gemv_q6k_fast(
         let e = unsafe { &mut *y.add(row) };
         *e = sum + beta * *e;
     }
-}
-
-#[inline(always)]
-unsafe fn load_u16(p: *const u8, off: usize) -> u16 {
-    let lo = unsafe { *p.add(off) } as u16;
-    let hi = unsafe { *p.add(off + 1) } as u16;
-    lo | (hi << 8)
-}
-
-/// `dp4a.s32.s32`: `c + Σ s8x4(a)·s8x4(b)` as i32. sm_61+.
-#[cfg(target_os = "cuda")]
-#[inline(always)]
-unsafe fn dp4a(a: u32, b: u32, c: i32) -> i32 {
-    let d: i32;
-    unsafe {
-        asm!("dp4a.s32.s32 {d}, {a}, {b}, {c};",
-            d = out(reg32) d, a = in(reg32) a, b = in(reg32) b, c = in(reg32) c)
-    };
-    d
-}
-#[cfg(not(target_os = "cuda"))]
-#[inline(always)]
-unsafe fn dp4a(_a: u32, _b: u32, _c: i32) -> i32 {
-    0
 }
 
 /// W6A8 Q6_K GEMV via dp4a (the mmvq-style integer-dot path).

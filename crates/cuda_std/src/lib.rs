@@ -44,6 +44,7 @@ pub mod misc;
 // pub mod rt;
 pub mod atomic;
 pub mod ptr;
+pub mod quant;
 pub mod shared;
 pub mod thread;
 pub mod warp;

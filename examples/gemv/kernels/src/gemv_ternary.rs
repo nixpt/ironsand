@@ -16,49 +16,10 @@
 //! Requires `k % 16 == 0`.
 
 use cuda_std::kernel;
+use cuda_std::quant::{dp4a, spread, warp_sum_i32};
 use cuda_std::thread;
-use cuda_std::warp;
-#[cfg(target_os = "cuda")]
-use core::arch::asm;
 
 const WARP: u32 = 32;
-
-/// `dp4a.s32.s32`: `c + Σ s8x4(a)·s8x4(b)` as i32. sm_61+.
-#[cfg(target_os = "cuda")]
-#[inline(always)]
-unsafe fn dp4a(a: u32, b: u32, c: i32) -> i32 {
-    let d: i32;
-    unsafe {
-        asm!("dp4a.s32.s32 {d}, {a}, {b}, {c};",
-            d = out(reg32) d, a = in(reg32) a, b = in(reg32) b, c = in(reg32) c)
-    };
-    d
-}
-#[cfg(not(target_os = "cuda"))]
-#[inline(always)]
-unsafe fn dp4a(_a: u32, _b: u32, _c: i32) -> i32 {
-    0
-}
-
-/// Spread 4 packed 2-bit codes (one byte: `c0|c1<<2|c2<<4|c3<<6`) into 4 byte
-/// lanes (`c0 | c1<<8 | c2<<16 | c3<<24`), each value still in `{0,1,2}`.
-/// Pure mask/shift/or — no per-byte subtract (that would borrow across bytes),
-/// so the `-1` of `signed = code-1` is deferred to a single `Σx` correction.
-#[inline(always)]
-fn spread(b: u32) -> u32 {
-    (b & 0x03) | ((b & 0x0C) << 6) | ((b & 0x30) << 12) | ((b & 0xC0) << 18)
-}
-
-#[inline(always)]
-unsafe fn warp_sum_i32(mut v: i32) -> i32 {
-    let mut off = WARP / 2;
-    while off >= 1 {
-        let (bits, _) = unsafe { warp::warp_shuffle_xor(u32::MAX, v as u32, off, WARP) };
-        v += bits as i32;
-        off >>= 1;
-    }
-    v
-}
 
 /// Warp-per-row ternary GEMV. `w` holds `m * (k/16)` packed `u32` words (16
 /// ternary codes each); `xq` is `k` int8 activations; `scale_w` is length `m`.

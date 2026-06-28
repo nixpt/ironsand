@@ -15,14 +15,11 @@
 //! Layout note: this is byte-faithful to llama.cpp's `block_q4_K`
 //! (`get_scale_min_k4` + the low/high-nibble `qs` order). Requires `k % 256 == 0`.
 
+use core::mem::MaybeUninit;
 use cuda_std::address_space;
 use cuda_std::kernel;
+use cuda_std::quant::{cvt_f16, dp4a, load_u16, scale_min, unpack_q4k_scales, warp_sum_f32};
 use cuda_std::thread;
-use cuda_std::warp;
-use cuda_std::GpuFloat;
-use core::mem::MaybeUninit;
-#[cfg(target_os = "cuda")]
-use core::arch::asm;
 
 const WARP: u32 = 32;
 const BLK: usize = 144; // bytes per Q4_K super-block
@@ -31,52 +28,6 @@ const BLK: usize = 144; // bytes per Q4_K super-block
 const MMQ_BLK: usize = 256;
 /// Max K (in-features) the shared activation buffer holds. Prefill cols = 2048.
 const MMQ_MAXK: usize = 2048;
-
-#[cfg(target_os = "cuda")]
-#[inline(always)]
-pub(crate) unsafe fn cvt_f16(bits: u16) -> f32 {
-    let o: f32;
-    unsafe { asm!("cvt.f32.f16 {o}, {i};", o = out(reg32) o, i = in(reg16) bits) };
-    o
-}
-#[cfg(not(target_os = "cuda"))]
-#[inline(always)]
-pub(crate) unsafe fn cvt_f16(_bits: u16) -> f32 {
-    0.0
-}
-
-#[inline(always)]
-pub(crate) unsafe fn load_u16(p: *const u8, off: usize) -> u16 {
-    let lo = unsafe { *p.add(off) } as u16;
-    let hi = unsafe { *p.add(off + 1) } as u16;
-    lo | (hi << 8)
-}
-
-/// llama.cpp `get_scale_min_k4`: unpack sub-block `j`'s 6-bit scale and min from
-/// the 12-byte `scales` array at `sc` (a pointer to `scales[0]`).
-#[inline(always)]
-unsafe fn scale_min(j: usize, sc: *const u8) -> (u32, u32) {
-    unsafe {
-        if j < 4 {
-            ((*sc.add(j) & 63) as u32, (*sc.add(j + 4) & 63) as u32)
-        } else {
-            let d = ((*sc.add(j + 4) & 0xF) | ((*sc.add(j - 4) >> 6) << 4)) as u32;
-            let m = ((*sc.add(j + 4) >> 4) | ((*sc.add(j) >> 6) << 4)) as u32;
-            (d, m)
-        }
-    }
-}
-
-#[inline(always)]
-unsafe fn warp_sum_f32(mut v: f32) -> f32 {
-    let mut off = WARP / 2;
-    while off >= 1 {
-        let (bits, _) = unsafe { warp::warp_shuffle_xor(u32::MAX, v.to_bits(), off, WARP) };
-        v += f32::from_bits(bits);
-        off >>= 1;
-    }
-    v
-}
 
 /// Warp-per-row Q4_K GEMV. `a` holds `m * (k/256)` super-blocks (144 bytes each);
 /// `x` is length `k`; `y` is length `m`.
@@ -89,14 +40,7 @@ unsafe fn warp_sum_f32(mut v: f32) -> f32 {
 /// `k % 256 == 0`; buffers sized as above; launch ≥ `m` warps, block % 32 == 0.
 #[kernel]
 #[allow(improper_ctypes_definitions)]
-pub unsafe fn gemv_q4k_warp(
-    a: &[u8],
-    x: &[f32],
-    y: *mut f32,
-    m: usize,
-    k: usize,
-    beta: f32,
-) {
+pub unsafe fn gemv_q4k_warp(a: &[u8], x: &[f32], y: *mut f32, m: usize, k: usize, beta: f32) {
     let tid = thread::block_dim_x() * thread::block_idx_x() + thread::thread_idx_x();
     let row = (tid / WARP) as usize;
     let lane = tid % WARP;
@@ -125,7 +69,11 @@ pub unsafe fn gemv_q4k_warp(
         let g = sub >> 1; // 64-weight group
         let qbase = bbase + 16 + g * 32;
         let byte = unsafe { *aptr.add(qbase + lane as usize) };
-        let nib = if (sub & 1) == 1 { byte >> 4 } else { byte & 0xF };
+        let nib = if (sub & 1) == 1 {
+            byte >> 4
+        } else {
+            byte & 0xF
+        };
         let w = d_eff * (nib as f32) - m_eff;
         acc += w * x[gw0 + lane as usize];
 
@@ -137,50 +85,6 @@ pub unsafe fn gemv_q4k_warp(
         let e = unsafe { &mut *y.add(row) };
         *e = sum + beta * *e;
     }
-}
-
-/// Unpack the 12-byte `scales` array (8 × 6-bit sub-scale + 8 × 6-bit sub-min,
-/// bit-packed per llama.cpp) from 3 `u32`s into two `[u32; 8]` arrays. The
-/// original [`scale_min`] does this byte-by-byte per sub-block; here we hoist
-/// all 12 bytes into registers up front so the per-sub-block dot has no
-/// scale-unpack latency.
-///
-/// Layout: bytes 0..7 hold the low halves of sc[0..3] and mn[0..3] (one 6-bit
-/// value per byte, low 6 bits used). Bytes 8..11 hold the low 4 bits of
-/// sc[4..7] and mn[4..7] (with the high 2 bits of those 8 values squeezed
-/// into the top 2 bits of bytes 0..7). See `get_scale_min_k4` in
-/// `ggml-quants.c` for the reference packer.
-///
-/// Per [`scale_min`], sub-block `j` (j ≥ 4) sources its high 2 bits from
-/// byte `(j-4)` of the same array. So sc[4]'s high 2 bits come from byte 0
-/// (NOT byte 3 — that's a common off-by-3 trap when reading the packed
-/// layout at a glance), sc[5] from byte 1, sc[6] from byte 2, sc[7] from
-/// byte 3. mn[4..7] likewise from bytes 4..7.
-///
-/// `s0` = bytes [0..4), `s1` = bytes [4..8), `s2` = bytes [8..12). Little-endian.
-#[inline(always)]
-pub(crate) fn unpack_q4k_scales(s0: u32, s1: u32, s2: u32) -> ([u32; 8], [u32; 8]) {
-    let sc = [
-        s0 & 0x3F,                                  // byte0 low 6
-        (s0 >> 8) & 0x3F,                           // byte1 low 6
-        (s0 >> 16) & 0x3F,                          // byte2 low 6
-        (s0 >> 24) & 0x3F,                          // byte3 low 6
-        (s2 & 0xF) | (((s0 >> 6) & 0x3) << 4),      // byte8 low 4 | byte0 high 2
-        ((s2 >> 8) & 0xF) | (((s0 >> 14) & 0x3) << 4),   // byte9 low 4 | byte1 high 2
-        ((s2 >> 16) & 0xF) | (((s0 >> 22) & 0x3) << 4),  // byte10 low 4 | byte2 high 2
-        ((s2 >> 24) & 0xF) | (((s0 >> 30) & 0x3) << 4),  // byte11 low 4 | byte3 high 2
-    ];
-    let mn = [
-        s1 & 0x3F,                                  // byte4 low 6
-        (s1 >> 8) & 0x3F,                           // byte5 low 6
-        (s1 >> 16) & 0x3F,                          // byte6 low 6
-        (s1 >> 24) & 0x3F,                          // byte7 low 6
-        ((s2 >> 4) & 0xF) | (((s1 >> 6) & 0x3) << 4),    // byte8 high 4 | byte4 high 2
-        ((s2 >> 12) & 0xF) | (((s1 >> 14) & 0x3) << 4),  // byte9 high 4 | byte5 high 2
-        ((s2 >> 20) & 0xF) | (((s1 >> 22) & 0x3) << 4),  // byte10 high 4 | byte6 high 2
-        ((s2 >> 28) & 0xF) | (((s1 >> 30) & 0x3) << 4),  // byte11 high 4 | byte7 high 2
-    ];
-    (sc, mn)
 }
 
 /// Optimized Q4_K GEMV: decode the super-block `d`/`dmin` once per 256 weights.
@@ -200,14 +104,7 @@ pub(crate) fn unpack_q4k_scales(s0: u32, s1: u32, s2: u32) -> ([u32; 8], [u32; 8
 /// As [`gemv_q4k_warp`].
 #[kernel]
 #[allow(improper_ctypes_definitions)]
-pub unsafe fn gemv_q4k_fast(
-    a: &[u8],
-    x: &[f32],
-    y: *mut f32,
-    m: usize,
-    k: usize,
-    beta: f32,
-) {
+pub unsafe fn gemv_q4k_fast(a: &[u8], x: &[f32], y: *mut f32, m: usize, k: usize, beta: f32) {
     let tid = thread::block_dim_x() * thread::block_idx_x() + thread::thread_idx_x();
     let row = (tid / WARP) as usize;
     let lane = tid % WARP;
@@ -235,7 +132,11 @@ pub unsafe fn gemv_q4k_fast(
             let g = sub >> 1;
             let qbase = bbase + 16 + g * 32;
             let byte = unsafe { *aptr.add(qbase + lane as usize) }; // coalesced
-            let nib = if (sub & 1) == 1 { byte >> 4 } else { byte & 0xF };
+            let nib = if (sub & 1) == 1 {
+                byte >> 4
+            } else {
+                byte & 0xF
+            };
             let gw = b * 256 + sub * 32 + lane as usize;
             acc += (d_eff * (nib as f32) - m_eff) * x[gw];
             sub += 1;
@@ -250,22 +151,7 @@ pub unsafe fn gemv_q4k_fast(
     }
 }
 
-/// `dp4a.s32.s32`: `c + Σ s8x4(a)·s8x4(b)` as i32. sm_61+.
-#[cfg(target_os = "cuda")]
-#[inline(always)]
-unsafe fn dp4a(a: u32, b: u32, c: i32) -> i32 {
-    let d: i32;
-    unsafe {
-        asm!("dp4a.s32.s32 {d}, {a}, {b}, {c};",
-            d = out(reg32) d, a = in(reg32) a, b = in(reg32) b, c = in(reg32) c)
-    };
-    d
-}
-#[cfg(not(target_os = "cuda"))]
-#[inline(always)]
-unsafe fn dp4a(_a: u32, _b: u32, _c: i32) -> i32 {
-    0
-}
+
 
 /// Optimized Q4_K GEMV (v3): pair-of-sub-blocks loop + u32 scale reads + FMA.
 ///
@@ -297,14 +183,7 @@ unsafe fn dp4a(_a: u32, _b: u32, _c: i32) -> i32 {
 /// As [`gemv_q4k_warp`].
 #[kernel]
 #[allow(improper_ctypes_definitions)]
-pub unsafe fn gemv_q4k_v3(
-    a: &[u8],
-    x: &[f32],
-    y: *mut f32,
-    m: usize,
-    k: usize,
-    beta: f32,
-) {
+pub unsafe fn gemv_q4k_v3(a: &[u8], x: &[f32], y: *mut f32, m: usize, k: usize, beta: f32) {
     let tid = thread::block_dim_x() * thread::block_idx_x() + thread::thread_idx_x();
     let row = (tid / WARP) as usize;
     let lane = tid % WARP;
@@ -480,14 +359,7 @@ pub unsafe fn gemv_q4k_vecdot(
 /// As [`gemv_q4k_warp`].
 #[kernel]
 #[allow(improper_ctypes_definitions)]
-pub unsafe fn gemv_q4k_v4(
-    a: &[u8],
-    x: &[f32],
-    y: *mut f32,
-    m: usize,
-    k: usize,
-    beta: f32,
-) {
+pub unsafe fn gemv_q4k_v4(a: &[u8], x: &[f32], y: *mut f32, m: usize, k: usize, beta: f32) {
     let tid = thread::block_dim_x() * thread::block_idx_x() + thread::thread_idx_x();
     let row = (tid / WARP) as usize;
     let lane = tid % WARP;

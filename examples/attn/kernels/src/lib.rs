@@ -16,4 +16,4 @@ mod stream_kernel;
 pub use crate::flash_attn::flash_attn;
 pub use crate::flash_attn_gqa::flash_attn_gqa;
 pub use crate::mma_f16::mma_f16_tile;
-pub use crate::stream_kernel::{stream_kernel, StreamOp, StreamQueue, Q4KBlock};
+pub use crate::stream_kernel::{Q4KBlockStub, StreamOp, StreamQueue, stream_kernel};

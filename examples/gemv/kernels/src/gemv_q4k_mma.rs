@@ -18,15 +18,11 @@
 //!   B[8×32]:  n=grp; b0 k 0-15, b1 k 16-31.
 //!   C[16×8]:  c0,c1 (row grp, col lane2·2+{0,1}); c2,c3 (row grp+8, …).
 
+use core::mem::MaybeUninit;
 use cuda_std::address_space;
 use cuda_std::kernel;
+use cuda_std::quant::{cvt_f16, f16_bits, load_u16, unpack_q4k_scales};
 use cuda_std::thread;
-use cuda_std::GpuFloat;
-use core::mem::MaybeUninit;
-#[cfg(target_os = "cuda")]
-use core::arch::asm;
-
-use crate::gemv_q4k::{cvt_f16, load_u16, unpack_q4k_scales};
 
 const QBLK: usize = 256; // threads/block for the activation-quant kernel
 const QMAXK: usize = 2048; // shared activation buffer (prefill cols = 2048)
@@ -38,9 +34,8 @@ const BLK: usize = 144; // bytes per Q4_K super-block
 #[inline(always)]
 unsafe fn mma_s8(a: [u32; 4], b: [u32; 2], c: [i32; 4]) -> [i32; 4] {
     let (mut d0, mut d1, mut d2, mut d3) = (c[0], c[1], c[2], c[3]);
-    unsafe {
-        asm!(
-            "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {{{0}, {1}, {2}, {3}}}, {{{4}, {5}, {6}, {7}}}, {{{8}, {9}}}, {{{0}, {1}, {2}, {3}}};",
+    unsafe {            core::arch::asm!(
+                "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {{{0}, {1}, {2}, {3}}}, {{{4}, {5}, {6}, {7}}}, {{{8}, {9}}}, {{{0}, {1}, {2}, {3}}};",
             inout(reg32) d0,
             inout(reg32) d1,
             inout(reg32) d2,
@@ -157,7 +152,13 @@ pub unsafe fn quant_act_q8(
 /// `j = tj + (lane/4)`, Q4_K super-block `b`, sub-block `subin`.
 #[cfg(target_os = "cuda")]
 #[inline(always)]
-unsafe fn load_b_nibbles(wptr: *const u8, jrow_base: usize, b: usize, subin: usize, lane2: usize) -> [u32; 2] {
+unsafe fn load_b_nibbles(
+    wptr: *const u8,
+    jrow_base: usize,
+    b: usize,
+    subin: usize,
+    lane2: usize,
+) -> [u32; 2] {
     let qbase = jrow_base + b * BLK + 16 + (subin >> 1) * 32;
     let r0 = unsafe { (wptr.add(qbase + lane2 * 4) as *const u32).read() };
     let r1 = unsafe { (wptr.add(qbase + lane2 * 4 + 16) as *const u32).read() };
@@ -171,20 +172,6 @@ unsafe fn load_b_nibbles(wptr: *const u8, jrow_base: usize, b: usize, subin: usi
 #[inline(always)]
 unsafe fn load_b_nibbles(_w: *const u8, _j: usize, _b: usize, _s: usize, _l: usize) -> [u32; 2] {
     [0, 0]
-}
-
-/// f32 → f16 bits (round-to-nearest).
-#[cfg(target_os = "cuda")]
-#[inline(always)]
-unsafe fn f16_bits(v: f32) -> u16 {
-    let o: u16;
-    unsafe { asm!("cvt.rn.f16.f32 {o}, {i};", o = out(reg16) o, i = in(reg32) v) };
-    o
-}
-#[cfg(not(target_os = "cuda"))]
-#[inline(always)]
-unsafe fn f16_bits(_v: f32) -> u16 {
-    0
 }
 
 /// Tensor-core Q4_K int8 mmq GEMM. `Y[N×M] = X[N×K]·dequant(W)ᵀ`. Inputs are the
