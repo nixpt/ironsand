@@ -12,8 +12,9 @@ use std::error::Error;
 
 use blastoff::{CublasContext, MatrixOp};
 use cust::event::{Event, EventFlags};
-use cust::launch;
-use cust::memory::{CopyDestination as _, DeviceBox, DeviceBuffer};
+use cust::kernel::{Kernel, KernelDescriptor};
+use cust::kernel_descriptor;
+use cust::memory::{CopyDestination as _, DeviceBox, DeviceBuffer, DevicePointer};
 use cust::module::Module;
 use cust::stream::{Stream, StreamFlags};
 use cust::util::SliceExt as _;
@@ -29,15 +30,248 @@ const EPS: f32 = 0.02;
 /// q/k/v/o and MLP gate/up/down for a ~7B model, plus the vocab lm_head, plus a
 /// small shape for a quick correctness anchor.
 const SHAPES: [(usize, usize); 6] = [
-    (256, 384),     // correctness anchor
-    (4096, 4096),   // attn projection
-    (11008, 4096),  // mlp gate/up
-    (4096, 11008),  // mlp down
-    (12288, 4096),  // fused qkv
-    (32000, 4096),  // lm_head (vocab)
+    (256, 384),    // correctness anchor
+    (4096, 4096),  // attn projection
+    (11008, 4096), // mlp gate/up
+    (4096, 11008), // mlp down
+    (12288, 4096), // fused qkv
+    (32000, 4096), // lm_head (vocab)
 ];
 
 static PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
+
+// ── Typed kernel descriptors ──────────────────────────────────────────────
+// Each descriptor maps a PTX kernel symbol to its host-side argument tuple.
+// The `KernelDescriptor::load` method fetches the kernel from the module with
+// compile-time type checking.
+
+kernel_descriptor! {
+    pub unsafe fn mma_int8_tile(
+        a: DevicePointer<u8>, a_len: usize,
+        b: DevicePointer<u8>, b_len: usize,
+        c: DevicePointer<i32>,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemm_q4k_mmq_dp4a(
+        wq: DevicePointer<u8>, wq_len: usize,
+        x: DevicePointer<f32>, x_len: usize,
+        y: DevicePointer<f32>,
+        n: usize, mrows: usize, k: usize,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn quant_act_q8(
+        x: DevicePointer<f32>, x_len: usize,
+        xq: DevicePointer<u8>,
+        xscale: DevicePointer<f32>,
+        bsum: DevicePointer<i32>,
+        n: usize, k: usize,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemm_q4k_mma(
+        wq: DevicePointer<u8>, wq_len: usize,
+        xq: DevicePointer<u8>, xq_len: usize,
+        xscale: DevicePointer<f32>, xscale_len: usize,
+        bsum: DevicePointer<i32>, bsum_len: usize,
+        y: DevicePointer<u16>,
+        n: usize, mrows: usize, k: usize,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_naive(
+        a: DevicePointer<f32>, a_len: usize,
+        x: DevicePointer<f32>, x_len: usize,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        alpha: f32, beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_block(
+        a: DevicePointer<f32>, a_len: usize,
+        x: DevicePointer<f32>, x_len: usize,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        alpha: f32, beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_warp(
+        a: DevicePointer<f32>, a_len: usize,
+        x: DevicePointer<f32>, x_len: usize,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        alpha: f32, beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_f16_warp(
+        a: DevicePointer<u16>, a_len: usize,
+        x: DevicePointer<f32>, x_len: usize,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        alpha: f32, beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_f16_vec4(
+        a: DevicePointer<u16>, a_len: usize,
+        x: DevicePointer<f32>, x_len: usize,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        alpha: f32, beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_i8_warp(
+        aq: DevicePointer<u8>, aq_len: usize,
+        sa: DevicePointer<f32>, sa_len: usize,
+        x: DevicePointer<f32>, x_len: usize,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_i8_dp4a(
+        aq: DevicePointer<u8>, aq_len: usize,
+        sa: DevicePointer<f32>, sa_len: usize,
+        xq: DevicePointer<u8>, xq_len: usize,
+        sx: f32,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_ternary_warp(
+        wt: DevicePointer<u32>, wt_len: usize,
+        sw: DevicePointer<f32>, sw_len: usize,
+        xq: DevicePointer<u8>, xq_len: usize,
+        sx: f32,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_ternary_dp4a(
+        wt: DevicePointer<u32>, wt_len: usize,
+        sw: DevicePointer<f32>, sw_len: usize,
+        xq: DevicePointer<u8>, xq_len: usize,
+        sx: f32, x_sum: i32,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_q4k_warp(
+        q4k: DevicePointer<u8>, q4k_len: usize,
+        x: DevicePointer<f32>, x_len: usize,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_q4k_fast(
+        q4k: DevicePointer<u8>, q4k_len: usize,
+        x: DevicePointer<f32>, x_len: usize,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_q4k_v3(
+        q4k: DevicePointer<u8>, q4k_len: usize,
+        x: DevicePointer<f32>, x_len: usize,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_q4k_v4(
+        q4k: DevicePointer<u8>, q4k_len: usize,
+        x: DevicePointer<f32>, x_len: usize,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_q4k_vecdot(
+        q4k: DevicePointer<u8>, q4k_len: usize,
+        xq: DevicePointer<u8>, xq_len: usize,
+        sx: f32,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_q6k_warp(
+        q6k: DevicePointer<u8>, q6k_len: usize,
+        x: DevicePointer<f32>, x_len: usize,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_q6k_fast(
+        q6k: DevicePointer<u8>, q6k_len: usize,
+        x: DevicePointer<f32>, x_len: usize,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_q6k_dp4a(
+        q6k: DevicePointer<u8>, q6k_len: usize,
+        xq: DevicePointer<u8>, xq_len: usize,
+        sx: f32,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemv_q6k_vecdot(
+        q6k: DevicePointer<u8>, q6k_len: usize,
+        xq: DevicePointer<u8>, xq_len: usize,
+        sx: f32,
+        y: DevicePointer<f32>,
+        m: usize, k: usize,
+        beta: f32,
+    );
+}
 
 /// Stage-0 spike: one int8 `m16n8k32` tensor-core mma tile vs a CPU int8 reference.
 /// Proves `rustc_codegen_nvvm`/LLVM19 can emit `mma.sync.*.s8` inline asm correctly.
@@ -76,12 +310,12 @@ fn run_mma_spike(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>>
     let b_gpu = b_u8.as_slice().as_dbuf()?;
     let c_gpu = vec![0i32; M * N].as_slice().as_dbuf()?;
 
-    let f = module.get_function("mma_int8_tile")?;
+    let kernel = mma_int8_tile::load(module)?;
     unsafe {
-        launch!(f<<<1, 32, 0, stream>>>(
+        kernel.launch(1, 32, 0, stream, (
             a_gpu.as_device_ptr(), a_gpu.len(),
             b_gpu.as_device_ptr(), b_gpu.len(),
-            c_gpu.as_device_ptr()
+            c_gpu.as_device_ptr(),
         ))?;
     }
     stream.synchronize()?;
@@ -93,7 +327,13 @@ fn run_mma_spike(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>>
     for i in 0..M * N {
         if c_out[i] != c_ref[i] {
             if bad < 8 {
-                println!("  mismatch [{},{}] gpu={} cpu={}", i / N, i % N, c_out[i], c_ref[i]);
+                println!(
+                    "  mismatch [{},{}] gpu={} cpu={}",
+                    i / N,
+                    i % N,
+                    c_out[i],
+                    c_ref[i]
+                );
             }
             bad += 1;
         }
@@ -105,7 +345,10 @@ fn run_mma_spike(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>>
             M * N
         );
     } else {
-        println!("MMA-SPIKE: FAIL — {bad}/{} elems mismatch (mma emitted but wrong layout/codegen)", M * N);
+        println!(
+            "MMA-SPIKE: FAIL — {bad}/{} elems mismatch (mma emitted but wrong layout/codegen)",
+            M * N
+        );
     }
     Ok(())
 }
@@ -124,7 +367,9 @@ fn run_q4k_mmq(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
     let xa = Array2::<f32>::random((n, k), Uniform::new(-1.0, 1.0));
 
     // Reference Y[n×m] = X · dequant(W)ᵀ in f64.
-    let wd = Array2::from_shape_vec((mrows, k), w_deq).unwrap().mapv(|v| v as f64);
+    let wd = Array2::from_shape_vec((mrows, k), w_deq)
+        .unwrap()
+        .mapv(|v| v as f64);
     let y_ref = xa.mapv(|v| v as f64).dot(&wd.t());
 
     let wq_gpu = wq.as_slice().as_dbuf()?;
@@ -132,13 +377,13 @@ fn run_q4k_mmq(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
     let x_gpu = x_flat.as_slice().as_dbuf()?;
     let y_gpu = vec![0.0f32; n * mrows].as_slice().as_dbuf()?;
 
-    let f = module.get_function("gemm_q4k_mmq_dp4a")?;
+    let kernel = gemm_q4k_mmq_dp4a::load(module)?;
     let run = || -> Result<(), Box<dyn Error>> {
         unsafe {
-            launch!(f<<<n as u32, 256, 0, stream>>>(
+            kernel.launch(n as u32, 256, 0, stream, (
                 wq_gpu.as_device_ptr(), wq_gpu.len(),
                 x_gpu.as_device_ptr(), x_gpu.len(),
-                y_gpu.as_device_ptr(), n, mrows, k
+                y_gpu.as_device_ptr(), n, mrows, k,
             ))?;
         }
         Ok(())
@@ -186,9 +431,13 @@ fn run_q4k_mmq(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
     // L2-rel ~1e-2 = pure int8-act-quant noise (the math is exact); a layout/index
     // bug would blow L2-rel to ≫0.1 and corrupt the large-magnitude outputs too.
     if l2_rel < 0.02 && max_rel_big < 0.08 {
-        println!("Q4K-MMQ: PASS — fused int8 mmq batched GEMM correct (dp4a inner). Stage 2 = swap → mma.sync + f16 out.");
+        println!(
+            "Q4K-MMQ: PASS — fused int8 mmq batched GEMM correct (dp4a inner). Stage 2 = swap → mma.sync + f16 out."
+        );
     } else {
-        println!("Q4K-MMQ: FAIL — L2-rel {l2_rel:.4} / max_rel_big {max_rel_big:.4} (structured error, not quant noise)");
+        println!(
+            "Q4K-MMQ: FAIL — L2-rel {l2_rel:.4} / max_rel_big {max_rel_big:.4} (structured error, not quant noise)"
+        );
     }
     Ok(())
 }
@@ -203,7 +452,9 @@ fn run_q4k_mma(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
     let w = Array2::<f32>::random((mrows, k), Uniform::new(-1.0, 1.0));
     let (wq, w_deq) = quantize_q4k(&w, mrows, k);
     let xa = Array2::<f32>::random((n, k), Uniform::new(-1.0, 1.0));
-    let wd = Array2::from_shape_vec((mrows, k), w_deq).unwrap().mapv(|v| v as f64);
+    let wd = Array2::from_shape_vec((mrows, k), w_deq)
+        .unwrap()
+        .mapv(|v| v as f64);
     let y_ref = xa.mapv(|v| v as f64).dot(&wd.t());
 
     let wq_gpu = wq.as_slice().as_dbuf()?;
@@ -214,16 +465,16 @@ fn run_q4k_mma(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
     let bsum_gpu = vec![0i32; n * nsub].as_slice().as_dbuf()?;
     let y_gpu = vec![0u16; n * mrows].as_slice().as_dbuf()?;
 
-    let qf = module.get_function("quant_act_q8")?;
-    let gf = module.get_function("gemm_q4k_mma")?;
+    let quant_kernel = quant_act_q8::load(module)?;
+    let gemm_kernel = gemm_q4k_mma::load(module)?;
 
     // Activation quant prologue (once); then time the gemm.
     let quant = || -> Result<(), Box<dyn Error>> {
         unsafe {
-            launch!(qf<<<n as u32, 256, 0, stream>>>(
+            quant_kernel.launch(n as u32, 256, 0, stream, (
                 x_gpu.as_device_ptr(), x_gpu.len(),
                 xq_gpu.as_device_ptr(), xscale_gpu.as_device_ptr(), bsum_gpu.as_device_ptr(),
-                n, k
+                n, k,
             ))?;
         }
         Ok(())
@@ -234,12 +485,12 @@ fn run_q4k_mma(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
     let grid = ((n / 16) * (mrows / 8)) as u32;
     let gemm = || -> Result<(), Box<dyn Error>> {
         unsafe {
-            launch!(gf<<<grid, 32, 0, stream>>>(
+            gemm_kernel.launch(grid, 32, 0, stream, (
                 wq_gpu.as_device_ptr(), wq_gpu.len(),
                 xq_gpu.as_device_ptr(), xq_gpu.len(),
                 xscale_gpu.as_device_ptr(), xscale_gpu.len(),
                 bsum_gpu.as_device_ptr(), bsum_gpu.len(),
-                y_gpu.as_device_ptr(), n, mrows, k
+                y_gpu.as_device_ptr(), n, mrows, k,
             ))?;
         }
         Ok(())
@@ -277,12 +528,16 @@ fn run_q4k_mma(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
     println!(
         "Q4K-MMA tensor-core (fused, f16 out): N={n} K={k} M={mrows}  {ms:.4} ms  {tflops:.1} TFLOP/s  (bar: cuBLAS-f16 ~60)"
     );
-    println!("  L2-rel={l2_rel:.5}  max_rel(|y|>{big_floor:.2})={max_rel_big:.4}  (std(y)={std:.2})");
+    println!(
+        "  L2-rel={l2_rel:.5}  max_rel(|y|>{big_floor:.2})={max_rel_big:.4}  (std(y)={std:.2})"
+    );
     // f16 out adds ~5e-4 rounding on top of int8-act noise; tolerate a hair more.
     if l2_rel < 0.025 && max_rel_big < 0.10 {
         println!("Q4K-MMA: PASS — int8 tensor-core mmq GEMM correct.");
     } else {
-        println!("Q4K-MMA: FAIL — L2-rel {l2_rel:.4} / max_rel_big {max_rel_big:.4} (fragment/scale bug)");
+        println!(
+            "Q4K-MMA: FAIL — L2-rel {l2_rel:.4} / max_rel_big {max_rel_big:.4} (fragment/scale bug)"
+        );
     }
     Ok(())
 }
@@ -339,69 +594,106 @@ fn main() -> Result<(), Box<dyn Error>> {
         // --- cuBLAS N=1 GEMM baseline -----------------------------------------
         // Row-major A (m x k) is column-major Aᵀ (k x m, ld=k); op=Transpose
         // recovers A, so C(m x 1) = A·x.  C ldc = m.
-        let cublas_run = |cublas: &mut CublasContext, y: &mut DeviceBuffer<f32>| -> Result<(), Box<dyn Error>> {
-            cublas.gemm::<f32>(
-                &stream, m, 1, k,
-                &alpha_gpu, &a_gpu, k, MatrixOp::Transpose,
-                &beta_gpu, &x_gpu, k, MatrixOp::None,
-                y, m,
-            )?;
-            Ok(())
-        };
-        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, || cublas_run(&mut cublas, &mut y_gpu))?;
-        report(&label, "cuBLAS(N=1)", ms, a_bytes, &check(&stream, &mut y_gpu, m, &y_ref)?);
+        let cublas_run =
+            |cublas: &mut CublasContext, y: &mut DeviceBuffer<f32>| -> Result<(), Box<dyn Error>> {
+                cublas.gemm::<f32>(
+                    &stream,
+                    m,
+                    1,
+                    k,
+                    &alpha_gpu,
+                    &a_gpu,
+                    k,
+                    MatrixOp::Transpose,
+                    &beta_gpu,
+                    &x_gpu,
+                    k,
+                    MatrixOp::None,
+                    y,
+                    m,
+                )?;
+                Ok(())
+            };
+        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, || {
+            cublas_run(&mut cublas, &mut y_gpu)
+        })?;
+        report(
+            &label,
+            "cuBLAS(N=1)",
+            ms,
+            a_bytes,
+            &check(&stream, &mut y_gpu, m, &y_ref)?,
+        );
 
         // --- Rust naive: thread per row ---------------------------------------
-        let naive = module.get_function("gemv_naive")?;
+        let naive = gemv_naive::load(&module)?;
         let naive_run = || -> Result<(), Box<dyn Error>> {
             let block = 256u32;
             let grid = (m as u32).div_ceil(block);
             unsafe {
-                launch!(naive<<<grid, block, 0, stream>>>(
+                naive.launch(grid, block, 0, stream, (
                     a_gpu.as_device_ptr(), a_gpu.len(),
                     x_gpu.as_device_ptr(), x_gpu.len(),
-                    y_gpu.as_device_ptr(), m, k, alpha, beta
+                    y_gpu.as_device_ptr(), m, k, alpha, beta,
                 ))?;
             }
             Ok(())
         };
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, naive_run)?;
-        report(&label, "rust naive", ms, a_bytes, &check(&stream, &mut y_gpu, m, &y_ref)?);
+        report(
+            &label,
+            "rust naive",
+            ms,
+            a_bytes,
+            &check(&stream, &mut y_gpu, m, &y_ref)?,
+        );
 
         // --- Rust block: block per row, shared-memory reduction ---------------
-        let block_k = module.get_function("gemv_block")?;
+        let block_k = gemv_block::load(&module)?;
         let block_run = || -> Result<(), Box<dyn Error>> {
             let block = 256u32; // must match BLOCK in the kernel
             let grid = m as u32; // one block per row
             unsafe {
-                launch!(block_k<<<grid, block, 0, stream>>>(
+                block_k.launch(grid, block, 0, stream, (
                     a_gpu.as_device_ptr(), a_gpu.len(),
                     x_gpu.as_device_ptr(), x_gpu.len(),
-                    y_gpu.as_device_ptr(), m, k, alpha, beta
+                    y_gpu.as_device_ptr(), m, k, alpha, beta,
                 ))?;
             }
             Ok(())
         };
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, block_run)?;
-        report(&label, "rust block", ms, a_bytes, &check(&stream, &mut y_gpu, m, &y_ref)?);
+        report(
+            &label,
+            "rust block",
+            ms,
+            a_bytes,
+            &check(&stream, &mut y_gpu, m, &y_ref)?,
+        );
 
         // --- Rust warp: warp per row, shuffle reduction -----------------------
-        let warp = module.get_function("gemv_warp")?;
+        let warp = gemv_warp::load(&module)?;
         let warp_run = || -> Result<(), Box<dyn Error>> {
             let block = 256u32; // 8 warps per block
             let warps_per_block = block / 32;
             let grid = (m as u32).div_ceil(warps_per_block);
             unsafe {
-                launch!(warp<<<grid, block, 0, stream>>>(
+                warp.launch(grid, block, 0, stream, (
                     a_gpu.as_device_ptr(), a_gpu.len(),
                     x_gpu.as_device_ptr(), x_gpu.len(),
-                    y_gpu.as_device_ptr(), m, k, alpha, beta
+                    y_gpu.as_device_ptr(), m, k, alpha, beta,
                 ))?;
             }
             Ok(())
         };
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, warp_run)?;
-        report(&label, "rust warp", ms, a_bytes, &check(&stream, &mut y_gpu, m, &y_ref)?);
+        report(
+            &label,
+            "rust warp",
+            ms,
+            a_bytes,
+            &check(&stream, &mut y_gpu, m, &y_ref)?,
+        );
 
         // --- f16 weights (the inference case: half the bytes) -----------------
         // Round A to f16, upload as raw u16 bits, and compute an f16-rounded
@@ -422,24 +714,41 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // cuBLAS f16 (hgemm) N=1 — the fair f16 vendor baseline.
         {
-            let a_f16: Vec<half::f16> =
-                a.as_standard_layout().iter().map(|&v| half::f16::from_f32(v)).collect();
+            let a_f16: Vec<half::f16> = a
+                .as_standard_layout()
+                .iter()
+                .map(|&v| half::f16::from_f32(v))
+                .collect();
             let x_f16: Vec<half::f16> = x.iter().map(|&v| half::f16::from_f32(v)).collect();
             let a16f = a_f16.as_slice().as_dbuf()?;
             let x16f = x_f16.as_slice().as_dbuf()?;
             let mut y16f = vec![half::f16::ZERO; m].as_slice().as_dbuf()?;
             let alpha16 = DeviceBox::new(&half::f16::from_f32(alpha))?;
             let beta16 = DeviceBox::new(&half::f16::from_f32(beta))?;
-            let run = |cublas: &mut CublasContext, y: &mut DeviceBuffer<half::f16>| -> Result<(), Box<dyn Error>> {
+            let run = |cublas: &mut CublasContext,
+                       y: &mut DeviceBuffer<half::f16>|
+             -> Result<(), Box<dyn Error>> {
                 cublas.gemm::<half::f16>(
-                    &stream, m, 1, k,
-                    &alpha16, &a16f, k, MatrixOp::Transpose,
-                    &beta16, &x16f, k, MatrixOp::None,
-                    y, m,
+                    &stream,
+                    m,
+                    1,
+                    k,
+                    &alpha16,
+                    &a16f,
+                    k,
+                    MatrixOp::Transpose,
+                    &beta16,
+                    &x16f,
+                    k,
+                    MatrixOp::None,
+                    y,
+                    m,
                 )?;
                 Ok(())
             };
-            let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, || run(&mut cublas, &mut y16f))?;
+            let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, || {
+                run(&mut cublas, &mut y16f)
+            })?;
             stream.synchronize()?;
             let mut host = vec![half::f16::ZERO; m];
             y16f.copy_to(&mut host)?;
@@ -449,26 +758,38 @@ fn main() -> Result<(), Box<dyn Error>> {
                 max_rel = max_rel.max(((got.to_f32() as f64) - want).abs() / want.abs().max(1.0));
             }
             // f16 accumulation (cublasHgemm) is lossy over large k; allow a wider band.
-            let res = if max_rel <= 0.10 { "ok".to_string() } else { format!("FAIL ({max_rel:.3})") };
+            let res = if max_rel <= 0.10 {
+                "ok".to_string()
+            } else {
+                format!("FAIL ({max_rel:.3})")
+            };
             report(&label, "cuBLAS f16", ms, f16_bytes, &res);
         }
 
-        for (kname, label_k) in [("gemv_f16_warp", "f16 warp"), ("gemv_f16_vec4", "f16 vec4")] {
-            let kf = module.get_function(kname)?;
+        for (_kname, label_k, kload) in [
+            ("gemv_f16_warp", "f16 warp", gemv_f16_warp::load(&module)?),
+            ("gemv_f16_vec4", "f16 vec4", gemv_f16_vec4::load(&module)?),
+        ] {
             let run = || -> Result<(), Box<dyn Error>> {
                 let block = 256u32; // 8 warps/block
                 let grid = (m as u32).div_ceil(block / 32);
                 unsafe {
-                    launch!(kf<<<grid, block, 0, stream>>>(
+                    kload.launch(grid, block, 0, stream, (
                         a16_gpu.as_device_ptr(), a16_gpu.len(),
                         x_gpu.as_device_ptr(), x_gpu.len(),
-                        y_gpu.as_device_ptr(), m, k, alpha, beta
+                        y_gpu.as_device_ptr(), m, k, alpha, beta,
                     ))?;
                 }
                 Ok(())
             };
             let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-            report(&label, label_k, ms, f16_bytes, &check(&stream, &mut y_gpu, m, &y_ref_f16)?);
+            report(
+                &label,
+                label_k,
+                ms,
+                f16_bytes,
+                &check(&stream, &mut y_gpu, m, &y_ref_f16)?,
+            );
         }
 
         // --- int8 weights (quantized decode: ¼ the bytes of f32) --------------
@@ -511,40 +832,52 @@ fn main() -> Result<(), Box<dyn Error>> {
         stream.synchronize()?;
 
         // W8A32 (int8 weights, f32 activations)
-        let i8w = module.get_function("gemv_i8_warp")?;
+        let i8w = gemv_i8_warp::load(&module)?;
         let run = || -> Result<(), Box<dyn Error>> {
             let block = 256u32;
             let grid = (m as u32).div_ceil(block / 32);
             unsafe {
-                launch!(i8w<<<grid, block, 0, stream>>>(
+                i8w.launch(grid, block, 0, stream, (
                     aq_gpu.as_device_ptr(), aq_gpu.len(),
                     sa_gpu.as_device_ptr(), sa_gpu.len(),
                     x_gpu.as_device_ptr(), x_gpu.len(),
-                    y_gpu.as_device_ptr(), m, k, beta
+                    y_gpu.as_device_ptr(), m, k, beta,
                 ))?;
             }
             Ok(())
         };
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-        report(&label, "i8 W8A32", ms, i8_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_w8, 0.03)?);
+        report(
+            &label,
+            "i8 W8A32",
+            ms,
+            i8_bytes,
+            &check_eps(&stream, &mut y_gpu, m, &y_ref_w8, 0.03)?,
+        );
 
         // W8A8 via dp4a (int8 weights × int8 activations)
-        let i8d = module.get_function("gemv_i8_dp4a")?;
+        let i8d = gemv_i8_dp4a::load(&module)?;
         let run = || -> Result<(), Box<dyn Error>> {
             let block = 256u32;
             let grid = (m as u32).div_ceil(block / 32);
             unsafe {
-                launch!(i8d<<<grid, block, 0, stream>>>(
+                i8d.launch(grid, block, 0, stream, (
                     aq_gpu.as_device_ptr(), aq_gpu.len(),
                     sa_gpu.as_device_ptr(), sa_gpu.len(),
                     xq_gpu.as_device_ptr(), xq_gpu.len(),
-                    sx, y_gpu.as_device_ptr(), m, k, beta
+                    sx, y_gpu.as_device_ptr(), m, k, beta,
                 ))?;
             }
             Ok(())
         };
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-        report(&label, "i8 dp4a", ms, i8_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_dp4a, 0.05)?);
+        report(
+            &label,
+            "i8 dp4a",
+            ms,
+            i8_bytes,
+            &check_eps(&stream, &mut y_gpu, m, &y_ref_dp4a, 0.05)?,
+        );
 
         // --- ternary i2_s (BitNet: 2 bits/weight) -----------------------------
         // Per-row ternary quant, scale = mean(|row|); codes = w+1 ∈ {0,1,2}
@@ -553,8 +886,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut w_tern = vec![0u32; m * kw];
         let mut scale_w = vec![0.0f32; m];
         for i in 0..m {
-            let mean_abs =
-                (0..k).map(|j| a[[i, j]].abs() as f64).sum::<f64>() / k as f64;
+            let mean_abs = (0..k).map(|j| a[[i, j]].abs() as f64).sum::<f64>() / k as f64;
             let s = (mean_abs as f32).max(1e-8);
             scale_w[i] = s;
             for j in 0..k {
@@ -578,215 +910,284 @@ fn main() -> Result<(), Box<dyn Error>> {
         let tern_bytes = (m * k / 4) as f64; // 2 bits/weight
         stream.synchronize()?;
 
-        let tk = module.get_function("gemv_ternary_warp")?;
+        let tk = gemv_ternary_warp::load(&module)?;
         let run = || -> Result<(), Box<dyn Error>> {
             let block = 256u32;
             let grid = (m as u32).div_ceil(block / 32);
             unsafe {
-                launch!(tk<<<grid, block, 0, stream>>>(
+                tk.launch(grid, block, 0, stream, (
                     wt_gpu.as_device_ptr(), wt_gpu.len(),
                     sw_gpu.as_device_ptr(), sw_gpu.len(),
                     xq_gpu.as_device_ptr(), xq_gpu.len(),
-                    sx, y_gpu.as_device_ptr(), m, k, beta
+                    sx, y_gpu.as_device_ptr(), m, k, beta,
                 ))?;
             }
             Ok(())
         };
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-        report(&label, "ternary", ms, tern_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_tern, 0.02)?);
+        report(
+            &label,
+            "ternary",
+            ms,
+            tern_bytes,
+            &check_eps(&stream, &mut y_gpu, m, &y_ref_tern, 0.02)?,
+        );
 
         // Optimized ternary: dp4a + branchless spread, with the Σx correction.
         let x_sum: i32 = x_q8.iter().map(|&b| b as i8 as i32).sum();
-        let tkd = module.get_function("gemv_ternary_dp4a")?;
+        let tkd = gemv_ternary_dp4a::load(&module)?;
         let run = || -> Result<(), Box<dyn Error>> {
             let block = 256u32;
             let grid = (m as u32).div_ceil(block / 32);
             unsafe {
-                launch!(tkd<<<grid, block, 0, stream>>>(
+                tkd.launch(grid, block, 0, stream, (
                     wt_gpu.as_device_ptr(), wt_gpu.len(),
                     sw_gpu.as_device_ptr(), sw_gpu.len(),
                     xq_gpu.as_device_ptr(), xq_gpu.len(),
-                    sx, x_sum, y_gpu.as_device_ptr(), m, k, beta
+                    sx, x_sum, y_gpu.as_device_ptr(), m, k, beta,
                 ))?;
             }
             Ok(())
         };
         let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-        report(&label, "tern dp4a", ms, tern_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_tern, 0.02)?);
+        report(
+            &label,
+            "tern dp4a",
+            ms,
+            tern_bytes,
+            &check_eps(&stream, &mut y_gpu, m, &y_ref_tern, 0.02)?,
+        );
 
         // --- Q4_K (GGUF 4-bit k-quant, 4.5 bits/weight) -----------------------
         // Q4_K super-blocks are 256 weights; only applicable when k % 256 == 0.
         if k % 256 == 0 {
-        let (q4k_blocks, a_deq) = quantize_q4k(&a, m, k);
-        let ad_q4k = ndarray::Array2::from_shape_vec((m, k), a_deq).unwrap().mapv(|v| v as f64);
-        let y_ref_q4k: Array1<f64> = ad_q4k.dot(&x.mapv(|v| v as f64));
-        // int8-activation reference for the W4A8 vecdot kernel (acts = sx * x_q8).
-        let x_a8_q4k: Array1<f64> = x_q8.iter().map(|&q| sx as f64 * (q as i8 as f64)).collect();
-        let y_ref_q4k_a8: Array1<f64> = ad_q4k.dot(&x_a8_q4k);
-        let q4k_gpu = q4k_blocks.as_slice().as_dbuf()?;
-        let q4k_bytes = (m * (k / 256) * 144) as f64; // real Q4_K storage = m*k*0.5625
-        stream.synchronize()?;
+            let (q4k_blocks, a_deq) = quantize_q4k(&a, m, k);
+            let ad_q4k = ndarray::Array2::from_shape_vec((m, k), a_deq)
+                .unwrap()
+                .mapv(|v| v as f64);
+            let y_ref_q4k: Array1<f64> = ad_q4k.dot(&x.mapv(|v| v as f64));
+            // int8-activation reference for the W4A8 vecdot kernel (acts = sx * x_q8).
+            let x_a8_q4k: Array1<f64> =
+                x_q8.iter().map(|&q| sx as f64 * (q as i8 as f64)).collect();
+            let y_ref_q4k_a8: Array1<f64> = ad_q4k.dot(&x_a8_q4k);
+            let q4k_gpu = q4k_blocks.as_slice().as_dbuf()?;
+            let q4k_bytes = (m * (k / 256) * 144) as f64; // real Q4_K storage = m*k*0.5625
+            stream.synchronize()?;
 
-        let q4k = module.get_function("gemv_q4k_warp")?;
-        let run = || -> Result<(), Box<dyn Error>> {
-            let block = 256u32;
-            let grid = (m as u32).div_ceil(block / 32);
-            unsafe {
-                launch!(q4k<<<grid, block, 0, stream>>>(
-                    q4k_gpu.as_device_ptr(), q4k_gpu.len(),
-                    x_gpu.as_device_ptr(), x_gpu.len(),
-                    y_gpu.as_device_ptr(), m, k, beta
-                ))?;
-            }
-            Ok(())
-        };
-        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-        report(&label, "Q4_K", ms, q4k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?);
+            let q4k = gemv_q4k_warp::load(&module)?;
+            let run = || -> Result<(), Box<dyn Error>> {
+                let block = 256u32;
+                let grid = (m as u32).div_ceil(block / 32);
+                unsafe {
+                    q4k.launch(grid, block, 0, stream, (
+                        q4k_gpu.as_device_ptr(), q4k_gpu.len(),
+                        x_gpu.as_device_ptr(), x_gpu.len(),
+                        y_gpu.as_device_ptr(), m, k, beta,
+                    ))?;
+                }
+                Ok(())
+            };
+            let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+            report(
+                &label,
+                "Q4_K",
+                ms,
+                q4k_bytes,
+                &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?,
+            );
 
-        // optimized: lane owns whole sub-blocks (header decode amortized 32x)
-        let q4kf = module.get_function("gemv_q4k_fast")?;
-        let run = || -> Result<(), Box<dyn Error>> {
-            let block = 256u32;
-            let grid = (m as u32).div_ceil(block / 32);
-            unsafe {
-                launch!(q4kf<<<grid, block, 0, stream>>>(
-                    q4k_gpu.as_device_ptr(), q4k_gpu.len(),
-                    x_gpu.as_device_ptr(), x_gpu.len(),
-                    y_gpu.as_device_ptr(), m, k, beta
-                ))?;
-            }
-            Ok(())
-        };
-        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-        report(&label, "Q4_K fast", ms, q4k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?);
+            // optimized: lane owns whole sub-blocks (header decode amortized 32x)
+            let q4kf = gemv_q4k_fast::load(&module)?;
+            let run = || -> Result<(), Box<dyn Error>> {
+                let block = 256u32;
+                let grid = (m as u32).div_ceil(block / 32);
+                unsafe {
+                    q4kf.launch(grid, block, 0, stream, (
+                        q4k_gpu.as_device_ptr(), q4k_gpu.len(),
+                        x_gpu.as_device_ptr(), x_gpu.len(),
+                        y_gpu.as_device_ptr(), m, k, beta,
+                    ))?;
+                }
+                Ok(())
+            };
+            let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+            report(
+                &label,
+                "Q4_K fast",
+                ms,
+                q4k_bytes,
+                &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?,
+            );
 
-        // optimized v3: pair-of-sub-blocks + u32 scale reads + FMA
-        let q4kv3 = module.get_function("gemv_q4k_v3")?;
-        let run = || -> Result<(), Box<dyn Error>> {
-            let block = 256u32;
-            let grid = (m as u32).div_ceil(block / 32);
-            unsafe {
-                launch!(q4kv3<<<grid, block, 0, stream>>>(
-                    q4k_gpu.as_device_ptr(), q4k_gpu.len(),
-                    x_gpu.as_device_ptr(), x_gpu.len(),
-                    y_gpu.as_device_ptr(), m, k, beta
-                ))?;
-            }
-            Ok(())
-        };
-        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-        report(&label, "Q4_K v3", ms, q4k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?);
+            // optimized v3: pair-of-sub-blocks + u32 scale reads + FMA
+            let q4kv3 = gemv_q4k_v3::load(&module)?;
+            let run = || -> Result<(), Box<dyn Error>> {
+                let block = 256u32;
+                let grid = (m as u32).div_ceil(block / 32);
+                unsafe {
+                    q4kv3.launch(grid, block, 0, stream, (
+                        q4k_gpu.as_device_ptr(), q4k_gpu.len(),
+                        x_gpu.as_device_ptr(), x_gpu.len(),
+                        y_gpu.as_device_ptr(), m, k, beta,
+                    ))?;
+                }
+                Ok(())
+            };
+            let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+            report(
+                &label,
+                "Q4_K v3",
+                ms,
+                q4k_bytes,
+                &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?,
+            );
 
-        // v4: 2-way super-block unroll on top of v3.
-        let q4kv4 = module.get_function("gemv_q4k_v4")?;
-        let run = || -> Result<(), Box<dyn Error>> {
-            let block = 256u32;
-            let grid = (m as u32).div_ceil(block / 32);
-            unsafe {
-                launch!(q4kv4<<<grid, block, 0, stream>>>(
-                    q4k_gpu.as_device_ptr(), q4k_gpu.len(),
-                    x_gpu.as_device_ptr(), x_gpu.len(),
-                    y_gpu.as_device_ptr(), m, k, beta
-                ))?;
-            }
-            Ok(())
-        };
-        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-        report(&label, "Q4_K v4", ms, q4k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?);
+            // v4: 2-way super-block unroll on top of v3.
+            let q4kv4 = gemv_q4k_v4::load(&module)?;
+            let run = || -> Result<(), Box<dyn Error>> {
+                let block = 256u32;
+                let grid = (m as u32).div_ceil(block / 32);
+                unsafe {
+                    q4kv4.launch(grid, block, 0, stream, (
+                        q4k_gpu.as_device_ptr(), q4k_gpu.len(),
+                        x_gpu.as_device_ptr(), x_gpu.len(),
+                        y_gpu.as_device_ptr(), m, k, beta,
+                    ))?;
+                }
+                Ok(())
+            };
+            let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+            report(
+                &label,
+                "Q4_K v4",
+                ms,
+                q4k_bytes,
+                &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k, 0.02)?,
+            );
 
-        // coalesced mmvq-style vec_dot (W4A8) — the mmvq-beating candidate
-        let q4kv = module.get_function("gemv_q4k_vecdot")?;
-        let run = || -> Result<(), Box<dyn Error>> {
-            let block = 256u32;
-            let grid = (m as u32).div_ceil(block / 32);
-            unsafe {
-                launch!(q4kv<<<grid, block, 0, stream>>>(
-                    q4k_gpu.as_device_ptr(), q4k_gpu.len(),
-                    xq_gpu.as_device_ptr(), xq_gpu.len(),
-                    sx, y_gpu.as_device_ptr(), m, k, beta
-                ))?;
-            }
-            Ok(())
-        };
-        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-        report(&label, "Q4_K vecdot", ms, q4k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k_a8, 0.03)?);
+            // coalesced mmvq-style vec_dot (W4A8) — the mmvq-beating candidate
+            let q4kv = gemv_q4k_vecdot::load(&module)?;
+            let run = || -> Result<(), Box<dyn Error>> {
+                let block = 256u32;
+                let grid = (m as u32).div_ceil(block / 32);
+                unsafe {
+                    q4kv.launch(grid, block, 0, stream, (
+                        q4k_gpu.as_device_ptr(), q4k_gpu.len(),
+                        xq_gpu.as_device_ptr(), xq_gpu.len(),
+                        sx, y_gpu.as_device_ptr(), m, k, beta,
+                    ))?;
+                }
+                Ok(())
+            };
+            let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+            report(
+                &label,
+                "Q4_K vecdot",
+                ms,
+                q4k_bytes,
+                &check_eps(&stream, &mut y_gpu, m, &y_ref_q4k_a8, 0.03)?,
+            );
 
-        // --- Q6_K (GGUF 6-bit k-quant, the lm_head format) ------------------
-        let (q6k_blocks, a6_deq) = quantize_q6k(&a, m, k);
-        let a6 = ndarray::Array2::from_shape_vec((m, k), a6_deq).unwrap();
-        let y_ref_q6k: Array1<f64> = a6.mapv(|v| v as f64).dot(&x.mapv(|v| v as f64));
-        // int8-activation reference for the W6A8 kernel (acts = sx * x_q8).
-        let x_a8: Array1<f64> = x_q8.iter().map(|&q| sx as f64 * (q as i8 as f64)).collect();
-        let y_ref_q6k_a8: Array1<f64> = a6.mapv(|v| v as f64).dot(&x_a8);
-        let q6k_gpu = q6k_blocks.as_slice().as_dbuf()?;
-        let q6k_bytes = (m * (k / 256) * 210) as f64; // 6.5625 bits/weight
-        stream.synchronize()?;
-        let q6k = module.get_function("gemv_q6k_warp")?;
-        let run = || -> Result<(), Box<dyn Error>> {
-            let block = 256u32;
-            let grid = (m as u32).div_ceil(block / 32);
-            unsafe {
-                launch!(q6k<<<grid, block, 0, stream>>>(
-                    q6k_gpu.as_device_ptr(), q6k_gpu.len(),
-                    x_gpu.as_device_ptr(), x_gpu.len(),
-                    y_gpu.as_device_ptr(), m, k, beta
-                ))?;
-            }
-            Ok(())
-        };
-        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-        report(&label, "Q6_K W6A32", ms, q6k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k, 0.02)?);
+            // --- Q6_K (GGUF 6-bit k-quant, the lm_head format) ------------------
+            let (q6k_blocks, a6_deq) = quantize_q6k(&a, m, k);
+            let a6 = ndarray::Array2::from_shape_vec((m, k), a6_deq).unwrap();
+            let y_ref_q6k: Array1<f64> = a6.mapv(|v| v as f64).dot(&x.mapv(|v| v as f64));
+            // int8-activation reference for the W6A8 kernel (acts = sx * x_q8).
+            let x_a8: Array1<f64> = x_q8.iter().map(|&q| sx as f64 * (q as i8 as f64)).collect();
+            let y_ref_q6k_a8: Array1<f64> = a6.mapv(|v| v as f64).dot(&x_a8);
+            let q6k_gpu = q6k_blocks.as_slice().as_dbuf()?;
+            let q6k_bytes = (m * (k / 256) * 210) as f64; // 6.5625 bits/weight
+            stream.synchronize()?;
+            let q6k = gemv_q6k_warp::load(&module)?;
+            let run = || -> Result<(), Box<dyn Error>> {
+                let block = 256u32;
+                let grid = (m as u32).div_ceil(block / 32);
+                unsafe {
+                    q6k.launch(grid, block, 0, stream, (
+                        q6k_gpu.as_device_ptr(), q6k_gpu.len(),
+                        x_gpu.as_device_ptr(), x_gpu.len(),
+                        y_gpu.as_device_ptr(), m, k, beta,
+                    ))?;
+                }
+                Ok(())
+            };
+            let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+            report(
+                &label,
+                "Q6_K W6A32",
+                ms,
+                q6k_bytes,
+                &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k, 0.02)?,
+            );
 
-        // Optimized Q6_K: mul_add FMA + 2-way super-block unroll.
-        let q6kf = module.get_function("gemv_q6k_fast")?;
-        let run = || -> Result<(), Box<dyn Error>> {
-            let block = 256u32;
-            let grid = (m as u32).div_ceil(block / 32);
-            unsafe {
-                launch!(q6kf<<<grid, block, 0, stream>>>(
-                    q6k_gpu.as_device_ptr(), q6k_gpu.len(),
-                    x_gpu.as_device_ptr(), x_gpu.len(),
-                    y_gpu.as_device_ptr(), m, k, beta
-                ))?;
-            }
-            Ok(())
-        };
-        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-        report(&label, "Q6_K fast", ms, q6k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k, 0.02)?);
+            // Optimized Q6_K: mul_add FMA + 2-way super-block unroll.
+            let q6kf = gemv_q6k_fast::load(&module)?;
+            let run = || -> Result<(), Box<dyn Error>> {
+                let block = 256u32;
+                let grid = (m as u32).div_ceil(block / 32);
+                unsafe {
+                    q6kf.launch(grid, block, 0, stream, (
+                        q6k_gpu.as_device_ptr(), q6k_gpu.len(),
+                        x_gpu.as_device_ptr(), x_gpu.len(),
+                        y_gpu.as_device_ptr(), m, k, beta,
+                    ))?;
+                }
+                Ok(())
+            };
+            let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+            report(
+                &label,
+                "Q6_K fast",
+                ms,
+                q6k_bytes,
+                &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k, 0.02)?,
+            );
 
-        // W6A8: int8 activations + dp4a integer dot (the mmvq-style path)
-        let q6kd = module.get_function("gemv_q6k_dp4a")?;
-        let run = || -> Result<(), Box<dyn Error>> {
-            let block = 256u32;
-            let grid = (m as u32).div_ceil(block / 32);
-            unsafe {
-                launch!(q6kd<<<grid, block, 0, stream>>>(
-                    q6k_gpu.as_device_ptr(), q6k_gpu.len(),
-                    xq_gpu.as_device_ptr(), xq_gpu.len(),
-                    sx, y_gpu.as_device_ptr(), m, k, beta
-                ))?;
-            }
-            Ok(())
-        };
-        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-        report(&label, "Q6_K W6A8", ms, q6k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k_a8, 0.03)?);
+            // W6A8: int8 activations + dp4a integer dot (the mmvq-style path)
+            let q6kd = gemv_q6k_dp4a::load(&module)?;
+            let run = || -> Result<(), Box<dyn Error>> {
+                let block = 256u32;
+                let grid = (m as u32).div_ceil(block / 32);
+                unsafe {
+                    q6kd.launch(grid, block, 0, stream, (
+                        q6k_gpu.as_device_ptr(), q6k_gpu.len(),
+                        xq_gpu.as_device_ptr(), xq_gpu.len(),
+                        sx, y_gpu.as_device_ptr(), m, k, beta,
+                    ))?;
+                }
+                Ok(())
+            };
+            let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+            report(
+                &label,
+                "Q6_K W6A8",
+                ms,
+                q6k_bytes,
+                &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k_a8, 0.03)?,
+            );
 
-        // coalesced mmvq-style vec_dot (W6A8)
-        let q6kv = module.get_function("gemv_q6k_vecdot")?;
-        let run = || -> Result<(), Box<dyn Error>> {
-            let block = 256u32;
-            let grid = (m as u32).div_ceil(block / 32);
-            unsafe {
-                launch!(q6kv<<<grid, block, 0, stream>>>(
-                    q6k_gpu.as_device_ptr(), q6k_gpu.len(),
-                    xq_gpu.as_device_ptr(), xq_gpu.len(),
-                    sx, y_gpu.as_device_ptr(), m, k, beta
-                ))?;
-            }
-            Ok(())
-        };
-        let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
-        report(&label, "Q6_K vecdot", ms, q6k_bytes, &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k_a8, 0.03)?);
+            // coalesced mmvq-style vec_dot (W6A8)
+            let q6kv = gemv_q6k_vecdot::load(&module)?;
+            let run = || -> Result<(), Box<dyn Error>> {
+                let block = 256u32;
+                let grid = (m as u32).div_ceil(block / 32);
+                unsafe {
+                    q6kv.launch(grid, block, 0, stream, (
+                        q6k_gpu.as_device_ptr(), q6k_gpu.len(),
+                        xq_gpu.as_device_ptr(), xq_gpu.len(),
+                        sx, y_gpu.as_device_ptr(), m, k, beta,
+                    ))?;
+                }
+                Ok(())
+            };
+            let ms = time(&stream, NUM_WARMUPS, NUM_RUNS, run)?;
+            report(
+                &label,
+                "Q6_K vecdot",
+                ms,
+                q6k_bytes,
+                &check_eps(&stream, &mut y_gpu, m, &y_ref_q6k_a8, 0.03)?,
+            );
         }
 
         println!();
@@ -879,8 +1280,7 @@ fn quantize_q4k(a: &Array2<f32>, m: usize, k: usize) -> (Vec<u8>, Vec<f32>) {
                 let d_eff = df * sc6[sb] as f32;
                 let m_eff = dmf * mn6[sb] as f32;
                 for l in 0..32 {
-                    a_deq[i * k + wbase + sb * 32 + l] =
-                        d_eff * (q[sb * 32 + l] as f32) - m_eff;
+                    a_deq[i * k + wbase + sb * 32 + l] = d_eff * (q[sb * 32 + l] as f32) - m_eff;
                 }
             }
         }
@@ -925,9 +1325,19 @@ fn quantize_q6k(a: &Array2<f32>, m: usize, k: usize) -> (Vec<u8>, Vec<f32>) {
                 let (lo, hi) = (q & 0xF, q >> 4);
                 let (ql_off, ql_high, qh_off, qh_shift) = match pos / 32 {
                     0 => (group * 64 + pos, false, group * 32 + pos, 0u8),
-                    1 => (group * 64 + (pos - 32) + 32, false, group * 32 + (pos - 32), 2),
+                    1 => (
+                        group * 64 + (pos - 32) + 32,
+                        false,
+                        group * 32 + (pos - 32),
+                        2,
+                    ),
                     2 => (group * 64 + (pos - 64), true, group * 32 + (pos - 64), 4),
-                    _ => (group * 64 + (pos - 96) + 32, true, group * 32 + (pos - 96), 6),
+                    _ => (
+                        group * 64 + (pos - 96) + 32,
+                        true,
+                        group * 32 + (pos - 96),
+                        6,
+                    ),
                 };
                 if ql_high {
                     blocks[base + ql_off] |= lo << 4;
