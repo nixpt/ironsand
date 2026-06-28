@@ -40,6 +40,123 @@ struct Saxpy(DevicePointer<f32>, DevicePointer<f32>, f32, usize);
 let saxpy = Saxpy::load(&module)?;
 ```
 
+## Migrating from `launch!` to `Kernel::launch`
+
+If you have existing code that uses the raw `launch!` macro and `module.get_function`, the migration is mechanical and usually takes only a few minutes per kernel.
+
+### Step-by-step
+
+1. **Remove** `use cust::launch;` and `module.get_function("...")`.
+2. **Add** `use cust::kernel::KernelDescriptor;` and `use cust::kernel_descriptor;`.
+3. **Declare** the kernel's host-side ABI with `kernel_descriptor!` (or derive it).
+4. **Load** the kernel once with `Descriptor::load(&module)?`.
+5. **Replace** `launch!(func<<<grid, block, smem, stream>>>(...))` with `kernel.launch(grid, block, smem, &stream, (...))`.
+
+### Simple kernel
+
+**Before** — raw `launch!`:
+
+```rs
+use cust::launch;
+use cust::function::{BlockSize, GridSize};
+
+let func = module.get_function("increment")?;
+let blocks = BlockSize::xy(512, 1);
+let grids = GridSize::xy(1024, 1);
+
+unsafe {
+    launch!(func<<<grids, blocks, 0, stream>>>(
+        device_a.as_device_ptr(),
+        value,
+    ))?;
+}
+```
+
+**After** — typed `Kernel`:
+
+```rs
+use cust::kernel::KernelDescriptor;
+use cust::kernel_descriptor;
+use cust::function::{BlockSize, GridSize};
+
+kernel_descriptor! {
+    pub unsafe fn increment(g_data: DevicePointer<u32>, inc_value: u32);
+}
+
+let increment = increment::load(&module)?;
+let blocks = BlockSize::xy(512, 1);
+let grids = GridSize::xy(1024, 1);
+
+unsafe {
+    increment.launch(grids, blocks, 0, &stream, (
+        device_a.as_device_ptr(),
+        value,
+    ))?;
+}
+```
+
+### Kernel with slices
+
+Device-side slices (`&[T]`) become a `(DevicePointer<T>, usize)` pair on the host.
+
+**Before**:
+
+```rs
+let func = module.get_function("matrix_mul_cuda")?;
+unsafe {
+    launch!(func<<<grid, threads, 0, stream>>>(
+        d_c.as_device_ptr(),
+        d_a.as_device_ptr(), d_a.len(),
+        d_b.as_device_ptr(), d_b.len(),
+        dims_a.x,
+        dims_b.x,
+    ))?;
+}
+```
+
+**After**:
+
+```rs
+kernel_descriptor! {
+    pub unsafe fn matrix_mul_cuda(
+        c: DevicePointer<f32>,
+        a: DevicePointer<f32>, a_len: usize,
+        b: DevicePointer<f32>, b_len: usize,
+        wa: usize,
+        wb: usize,
+    );
+}
+
+let matrix_mul_cuda = matrix_mul_cuda::load(&module)?;
+unsafe {
+    matrix_mul_cuda.launch(grid, threads, 0, &stream, (
+        d_c.as_device_ptr(),
+        d_a.as_device_ptr(), d_a.len(),
+        d_b.as_device_ptr(), d_b.len(),
+        dims_a.x,
+        dims_b.x,
+    ))?;
+}
+```
+
+### Common pitfalls
+
+| Issue | Raw API | Typed API |
+|---|---|---|
+| **Stream reference** | `launch!(func<<<..., stream>>>(...))` — stream is passed by value in the macro | `kernel.launch(..., &stream, (...))` — `launch` takes `&Stream`, so pass a reference |
+| **Argument tuple** | Arguments are expanded directly in the macro | Arguments are wrapped in a Rust tuple: `(a, b, c)` |
+| **`DevicePointer` import** | Only needed if you use it explicitly | Needed in the `kernel_descriptor!` declaration; add `use cust::memory::DevicePointer;` or rely on `cust::prelude::*` |
+| **Loading** | `module.get_function("name")?` each time you need it | `Descriptor::load(&module)?` once, then reuse the `Kernel` handle |
+
+### Gradual adoption
+
+You do not have to migrate every kernel at once. A `Kernel` can be converted back to a raw `Function` with `.into()` or `.as_function()`, so you can wrap one kernel in the typed API while leaving the rest unchanged:
+
+```rs
+let typed = saxpy::load(&module)?;
+let raw: Function = typed.into(); // hand off to legacy code
+```
+
 ## Manual loading without a descriptor
 
 Sometimes you need the type safety of `Kernel` but do not want to declare a descriptor (e.g. for a one-off experiment or a dynamically-named kernel). Use `Module::get_kernel`:
