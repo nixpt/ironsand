@@ -3,10 +3,11 @@
 //! This example benchmarks naive and tiled GEMM kernels as well as cuBLAS for various matrix sizes.
 //! It uses the `cust` crate for CUDA management and `ndarray` for host-side matrix operations.
 
-use std::cell;
 use std::error::Error;
 
 use cust::event;
+use cust::kernel::{Kernel, KernelDescriptor};
+use cust::kernel_descriptor;
 use cust::launch;
 use cust::memory;
 use cust::memory::CopyDestination as _;
@@ -24,9 +25,46 @@ const NUM_RUNS: usize = 10;
 const MAT_SIZES: [usize; 8] = [32, 64, 128, 256, 512, 1024, 2048, 4096];
 static PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 
+/// Host-side argument tuple for the GEMM kernels.
+///
+/// The device signature `&[f32], &[f32], *mut f32, ...` maps to the PTX ABI as
+/// `(ptr, len), (ptr, len), ptr, usize, usize, usize, f32, f32`.
+type GemmArgs = (
+    memory::DevicePointer<f32>,
+    usize,
+    memory::DevicePointer<f32>,
+    usize,
+    memory::DevicePointer<f32>,
+    usize,
+    usize,
+    usize,
+    f32,
+    f32,
+);
+
+kernel_descriptor! {
+    pub unsafe fn gemm_naive(
+        a: memory::DevicePointer<f32>, a_len: usize,
+        b: memory::DevicePointer<f32>, b_len: usize,
+        c: memory::DevicePointer<f32>,
+        m: usize, n: usize, k: usize,
+        alpha: f32, beta: f32,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn gemm_tiled(
+        a: memory::DevicePointer<f32>, a_len: usize,
+        b: memory::DevicePointer<f32>, b_len: usize,
+        c: memory::DevicePointer<f32>,
+        m: usize, n: usize, k: usize,
+        alpha: f32, beta: f32,
+    );
+}
+
 type GemmFn = dyn Fn(
     &stream::Stream,
-    &module::Module,
+    &Kernel<'_, GemmArgs>,
     &memory::DeviceBuffer<f32>,
     &memory::DeviceBuffer<f32>,
     &mut memory::DeviceBuffer<f32>,
@@ -51,9 +89,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // GPU calls.
     let stream = stream::Stream::new(stream::StreamFlags::NON_BLOCKING, None)?;
 
+    // Load typed kernels once and reuse them for every benchmark shape.
+    let naive_kernel = gemm_naive::load(&module)?;
+    let tiled_kernel = gemm_tiled::load(&module)?;
+
     run_cublas(&stream)?;
-    run_gemm_kernel(&stream, &module, &gemm_naive, "gemm_naive")?;
-    run_gemm_kernel(&stream, &module, &gemm_tiled, "gemm_tiled")?;
+    run_gemm_kernel(&stream, &naive_kernel, &gemm_naive, "gemm_naive")?;
+    run_gemm_kernel(&stream, &tiled_kernel, &gemm_tiled, "gemm_tiled")?;
 
     Ok(())
 }
@@ -190,7 +232,7 @@ fn run_cublas(stream: &stream::Stream) -> Result<(), Box<dyn Error>> {
 /// This function benchmarks the provided GEMM kernel and checks the result for small matrices.
 fn run_gemm_kernel(
     stream: &stream::Stream,
-    module: &module::Module,
+    kernel: &Kernel<'_, GemmArgs>,
     gemm_fn: &GemmFn,
     kernel_name: &str,
 ) -> Result<(), Box<dyn Error>> {
@@ -208,7 +250,7 @@ fn run_gemm_kernel(
 
         gemm_fn(
             stream,
-            module,
+            kernel,
             &mat_a_gpu,
             &mat_b_gpu,
             &mut mat_c_gpu,
@@ -240,7 +282,7 @@ fn run_gemm_kernel(
         for _ in 0..NUM_WARMUPS {
             gemm_fn(
                 stream,
-                module,
+                kernel,
                 &mat_a_gpu,
                 &mat_b_gpu,
                 &mut mat_c_gpu,
@@ -260,7 +302,7 @@ fn run_gemm_kernel(
         for _ in 0..NUM_RUNS {
             gemm_fn(
                 stream,
-                module,
+                kernel,
                 &mat_a_gpu,
                 &mat_b_gpu,
                 &mut mat_c_gpu,
@@ -340,7 +382,7 @@ fn assert_gemm_eq<T>(
 #[allow(clippy::too_many_arguments)]
 pub fn gemm_naive(
     stream: &stream::Stream,
-    module: &module::Module,
+    kernel: &Kernel<'_, GemmArgs>,
     mat_a: &memory::DeviceBuffer<f32>,
     mat_b: &memory::DeviceBuffer<f32>,
     mat_c: &mut memory::DeviceBuffer<f32>,
@@ -354,17 +396,9 @@ pub fn gemm_naive(
     assert_eq!(mat_b.len(), k * n);
     assert_eq!(mat_c.len(), m * n);
 
-    let kernel_cell = cell::LazyCell::new(|| {
-        module
-            .get_function("gemm_naive")
-            .expect("kernel not found.")
-    });
-    let kernel = &*kernel_cell;
-
-    // use the CUDA occupancy API to find an optimal launch configuration for the grid and block size.
-    // This will try to maximize how much of the GPU is used by finding the best launch configuration for the
-    // current CUDA device/architecture.
-    let (_, block_size) = kernel.suggested_launch_configuration(0, 0.into())?;
+    // Use the CUDA occupancy API to find an optimal launch configuration for the grid and block size.
+    let func = kernel.as_function();
+    let (_, block_size) = func.suggested_launch_configuration(0, 0.into())?;
     let block_size = block_size as usize;
     let (block_size_x, block_size_y) = if block_size > m * n {
         (block_size.div_ceil(m) as u32, m as u32)
@@ -376,13 +410,12 @@ pub fn gemm_naive(
         (n as u32).div_ceil(block_size_y),
     );
     unsafe {
-        launch!(
-            kernel<<<
-                (grid_size_x, grid_size_y),
-                (block_size_x, block_size_y),
-                0,
-                stream
-            >>>(
+        kernel.launch(
+            (grid_size_x, grid_size_y),
+            (block_size_x, block_size_y),
+            0,
+            stream,
+            (
                 mat_a.as_device_ptr(),
                 mat_a.len(),
                 mat_b.as_device_ptr(),
@@ -393,9 +426,9 @@ pub fn gemm_naive(
                 k,
                 alpha,
                 beta,
-            )
+            ),
         )?;
-    };
+    }
     Ok(())
 }
 
@@ -417,7 +450,7 @@ pub fn gemm_naive(
 #[allow(clippy::too_many_arguments)]
 pub fn gemm_tiled(
     stream: &stream::Stream,
-    module: &module::Module,
+    kernel: &Kernel<'_, GemmArgs>,
     mat_a: &memory::DeviceBuffer<f32>,
     mat_b: &memory::DeviceBuffer<f32>,
     mat_c: &mut memory::DeviceBuffer<f32>,
@@ -431,22 +464,14 @@ pub fn gemm_tiled(
     assert_eq!(mat_b.len(), k * n);
     assert_eq!(mat_c.len(), m * n);
 
-    let kernel_cell = cell::LazyCell::new(|| {
-        module
-            .get_function("gemm_tiled")
-            .expect("kernel not found.")
-    });
-    let kernel = &*kernel_cell;
-
     let (grid_size_x, grid_size_y) = (n.div_ceil(TILE_SIZE) as u32, m.div_ceil(TILE_SIZE) as u32);
     unsafe {
-        launch!(
-            kernel<<<
-                (grid_size_x, grid_size_y),
-                (TILE_SIZE as u32, TILE_SIZE as u32),
-                0,
-                stream
-            >>>(
+        kernel.launch(
+            (grid_size_x, grid_size_y),
+            (TILE_SIZE as u32, TILE_SIZE as u32),
+            0,
+            stream,
+            (
                 mat_a.as_device_ptr(),
                 mat_a.len(),
                 mat_b.as_device_ptr(),
@@ -457,8 +482,8 @@ pub fn gemm_tiled(
                 k,
                 alpha,
                 beta,
-            )
+            ),
         )?;
-    };
+    }
     Ok(())
 }
