@@ -15,8 +15,10 @@ A compile-time-typed kernel launch system has been added to `cust`, making kerne
 - **`#[derive(KernelDescriptor)]`** proc macro (`cust_derive`) — derive on a tuple struct with `#[kernel_name = "..."]` to auto-implement the trait.
 - **`kernel_descriptor!`** declarative macro — function-signature syntax (`unsafe fn name(...)`) that generates a descriptor struct and `KernelDescriptor` impl. Supports optional `#[kernel_name = "..."]` override.
 - **`typed_kernel!`** declarative macro — loads a kernel by name with an inline tuple type: `typed_kernel!(module, "name" => (T1, T2))`.
+- **`Clone + Copy` for `Function` and `Kernel`** — enables cheap duplication and reuse across multiple streams.
+- **Prelude re-exports** — `DevicePointer`, `DeviceBox`, `DeviceBuffer`, `DeviceCopy`, and `DeviceVariable` are now available via `cust::prelude::*`.
 - **Occupancy helpers on `Kernel`** — forwards `suggested_launch_configuration`, `max_active_blocks_per_multiprocessor`, `available_dynamic_shared_memory_per_block`, and `get_attribute` from the underlying `Function`.
-- **`KernelArgs` trait** — sealed unsafe trait implemented for tuples of `DeviceCopy` types up to 14 elements.
+- **`KernelArgs` trait** — sealed unsafe trait implemented for tuples of `DeviceCopy` types. Expanded from 12 to 14 elements to support larger kernel signatures.
 
 #### Example conversions
 
@@ -26,6 +28,7 @@ A compile-time-typed kernel launch system has been added to `cust`, making kerne
 
 #### Tests
 
+- Added `trybuild` as a `dev-dependency` in `crates/cust/Cargo.toml`.
 - Added trybuild UI tests for `#[derive(KernelDescriptor)]` in `crates/cust/tests/`:
   - 4 pass tests: unnamed struct, named struct, unit struct, single-field struct
   - 5 compile-fail tests: missing `#[kernel_name]`, wrong attribute type, generic struct, enum, union — with stable `.stderr` snapshots
