@@ -2,7 +2,7 @@
 
 ## Required libraries
 
-Rust CUDA has several prerequisites.
+ironsand has several prerequisites.
 
 - A machine with an NVIDIA GPU with a Compute Capability of 5.0 (Maxwell) or later.
 - [CUDA](https://developer.nvidia.com/cuda-downloads) version 12.0 or later.
@@ -44,7 +44,7 @@ make index calculations for programs with 2D or 3D data simpler.
 
 ## A first example: the code
 
-This section will walk through a simple Rust CUDA program that adds two small 1D vectors on the
+This section will walk through a simple ironsand program that adds two small 1D vectors on the
 GPU. It consists of two tiny crates and some connecting pieces.
 
 The file structure looks like this:
@@ -103,7 +103,7 @@ cuda_std = { git = "https://github.com/rust-gpu/rust-cuda", rev = "7fa76f3d71703
 crate-type = ["cdylib", "rlib"]
 ```
 
-At the time of writing there are no recent releases of any Rust CUDA crates so it is best
+At the time of writing there are no recent releases of any ironsand crates so it is best
 to use code directly from the GitHub repository via `git` and `rev`. The above revision works but
 later revisions should also work.
 
@@ -141,7 +141,7 @@ like normal Rust code, but some parts are unusual.
   kernels is incompatible with safe Rust.
 - The inputs (`a` and `b`) are normal slices but the output (`c`) is a raw pointer. Again, this
   is because `c` is mutable state shared by multiple kernels executing in parallel. Using `&mut
-  [T]` would incorrectly indicate that it is non-shared mutable state, and therefore Rust CUDA does
+  [T]` would incorrectly indicate that it is non-shared mutable state, and therefore ironsand does
   not allow mutable references as argument to kernels. Raw pointers do not have this restriction.
   Therefore, we use a pointer and only make a mutable reference once we have an element
   (`c.add(i)`) that we know won't be touched by other kernel invocations.
@@ -269,6 +269,117 @@ fn main() -> Result<(), Box<dyn Error>> {
 Because `T` is shared between the crates, the type used in the buffers could be changed from `f32`
 to `f64` by modifying just the definition of `T`. Without that, such a change would require
 modifying lines in both crates, and any inconsistencies could cause correctness problems.
+
+## Typed kernel handles (recommended)
+
+The `launch!` macro used above is convenient but entirely unchecked at compile time. A typo in
+the kernel name, the wrong number of arguments, or a type mismatch (e.g. passing an `f64` where
+the kernel expects `f32`) will only surface as a runtime error or silent data corruption.
+
+`cust` provides a **typed kernel API** that encodes the kernel's parameter signature in the Rust
+type system, eliminating this entire class of errors.
+
+### Loading a typed kernel
+
+Use [`Kernel<'a, Args>`][kernel] where `Args` is a tuple of the kernel's argument types. Each
+element must implement [`DeviceCopy`][devicecopy].
+
+```rust
+use cust::prelude::*;
+
+let add_kernel: Kernel<(
+    DevicePointer<f32>, usize,
+    DevicePointer<f32>, usize,
+    DevicePointer<f32>,
+)> = module.get_kernel("add")?;
+```
+
+`module.get_kernel::<Args>(name)` is a typed wrapper around `module.get_function(name)`. If the
+kernel name is wrong, you get a `NotFound` error just like before, but if the argument tuple
+does not match the kernel's actual signature, the mismatch is caught at compile time on the host.
+
+### Launching a typed kernel
+
+Instead of the `launch!` macro, call [`Kernel::launch`][kernel-launch] directly. The arguments
+are passed as a tuple whose type must exactly match the `Kernel`'s `Args` parameter:
+
+```rust
+unsafe {
+    add_kernel.launch(
+        1u32,           // grid size
+        4u32,           // block size
+        0,              // dynamic shared memory
+        &stream,
+        (
+            a_gpu.as_device_ptr(), a_gpu.len(),
+            b_gpu.as_device_ptr(), b_gpu.len(),
+            c_gpu.as_device_ptr(),
+        ),
+    )?;
+}
+```
+
+If you forget an argument, pass them in the wrong order, or use the wrong type, the compiler
+rejects it immediately.
+
+### Convenience macros
+
+Manually spelling out the full tuple type every time is verbose. `cust` provides two ways to
+avoid the boilerplate.
+
+**`typed_kernel!`** — a quick, expression-level macro:
+
+```rust
+let add_kernel = typed_kernel!(module, "add" => (
+    DevicePointer<f32>, usize,
+    DevicePointer<f32>, usize,
+    DevicePointer<f32>
+))?;
+```
+
+**`kernel_descriptor!`** — a declaration-level macro that creates a reusable descriptor. It
+accepts a function-like syntax and generates a struct plus a [`KernelDescriptor`][kerneldesc]
+implementation:
+
+```rust
+kernel_descriptor! {
+    unsafe fn AddKernel(
+        a: DevicePointer<f32>, a_len: usize,
+        b: DevicePointer<f32>, b_len: usize,
+        c: DevicePointer<f32>
+    );
+}
+
+// Later:
+let add_kernel = AddKernel::load(&module)?;
+```
+
+**`#[derive(KernelDescriptor)]`** — a derive macro for structs:
+
+```rust
+#[derive(KernelDescriptor)]
+#[kernel_name = "add"]
+struct Add(DevicePointer<f32>, usize, DevicePointer<f32>, usize, DevicePointer<f32>);
+
+let add_kernel = Add::load(&module)?;
+```
+
+All three approaches give you a value of type `Kernel<'a, Args>` with full compile-time checking.
+
+### Raw handle fallback
+
+If you need to drop down to the untyped level, every `Kernel` can be converted back to a raw
+[`Function`][function]:
+
+```rust
+let raw: Function<'_> = add_kernel.into();
+```
+
+[kernel]: https://docs.rs/cust/latest/cust/kernel/struct.Kernel.html
+[kernel-launch]: https://docs.rs/cust/latest/cust/kernel/struct.Kernel.html#method.launch
+[kerneldesc]: https://docs.rs/cust/latest/cust/kernel/trait.KernelDescriptor.html
+[devicecopy]: https://docs.rs/cust/latest/cust/memory/trait.DeviceCopy.html
+[function]: https://docs.rs/cust/latest/cust/function/struct.Function.html
 
 ## A first example: building and running
 
