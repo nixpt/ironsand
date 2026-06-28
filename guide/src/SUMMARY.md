@@ -3,6 +3,7 @@
 - [Introduction](introduction.md)
 - [Guide](guide/README.md)
   - [Getting Started](guide/getting_started.md)
+  - [Typed Kernels](guide/typed_kernels.md)
   - [Compute Capability Gating](guide/compute_capabilities.md)
   - [Tips](guide/tips.md)
   - [Kernel ABI](guide/kernel_abi.md)
