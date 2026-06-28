@@ -95,12 +95,19 @@ as well as general ease of use, we suggest that unified memory generally be used
 Kernel Launches are the most unsafe part of CUDA, many things must be checked by the developer to soundly launch a kernel.
 It is fundamentally impossible for us to verify a large portion of the invariants expected by the kernel/CUDA.
 
-The following invariants must be upheld by the caller of a kernel, failure to do so is undefined behavior:
-- The number of parameters passed to the kernel must match the expected number of parameters.
+The [`Kernel<'a, Args>`](../../kernel/struct.Kernel.html) typed handle and [`KernelDescriptor`](../../kernel/trait.KernelDescriptor.html) trait
+can eliminate an entire class of launch errors at compile time by encoding the expected argument tuple in the type system.
+Using `Kernel::launch` or `kernel_descriptor!` guarantees that:
+
+- The number of parameters matches the kernel signature.
+- The order and Rust types of parameters match the kernel ABI (see [Kernel ABI](kernel_abi.html)).
+
+The following invariants are still the caller's responsibility; failure to uphold them is undefined behavior:
+
 - The dimensionality expected by the kernel must match, e.g. if the kernel expects 2d thread indices, it is undefined
 behavior to launch the kernel with 3d thread indices (which would cause a data race). However, it is not undefined behavior
 to launch the kernel with a dimensionality lower than expected, e.g. launching a 2d kernel with a 1d dimensionality.
-- The types expected by the kernel must match:
+- The types expected by the kernel must match at the ABI level:
   - If the kernel expects a struct, if the struct is `repr(Rust)`, the struct must be the actual struct from the kernel library,
     otherwise, if it is `repr(C)` (which is recommended), the fields must all match, including alignment and order of fields.
 - Reference aliasing rules must not be violated, including:

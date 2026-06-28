@@ -64,6 +64,21 @@ unsafe {
 }
 ```
 
+With the typed [`Kernel`](../../kernel/struct.Kernel.html) API you can make the argument contract explicit:
+
+```rs
+use cust::prelude::*;
+
+kernel_descriptor! {
+    pub unsafe fn kernel_foo(foo: Foo);
+}
+
+let k = kernel_foo::load(&module)?;
+unsafe {
+    k.launch((foo,), 1, 1, stream)?;
+}
+```
+
 And not
 
 ```rs
@@ -119,6 +134,22 @@ unsafe {
 }
 ```
 
+The typed kernel API makes the two-word layout explicit in the host-side signature so a mismatch is caught at compile time:
+
+```rs
+kernel_descriptor! {
+    pub unsafe fn kernel_slice(ptr: DevicePointer<u8>, len: usize);
+}
+
+let k = kernel_slice::load(&module)?;
+unsafe {
+    k.launch(
+        (buf.as_device_ptr(), buf.len()),
+        1, 1, stream
+    )?;
+}
+```
+
 You may get warnings about slices being an improper C-type, but the warnings are safe to ignore, the codegen backend guarantees 
 that slices are passed as pairs of params.
 
@@ -153,6 +184,19 @@ unsafe {
   launch!(
     module.kernel<<<1, 1, 0, stream>>>(val.as_device_ptr())
   )?;
+}
+```
+
+Again, a typed descriptor prevents passing the wrong number or kind of arguments:
+
+```rs
+kernel_descriptor! {
+    pub unsafe fn kernel_ref(val: DevicePointer<u8>);
+}
+
+let k = kernel_ref::load(&module)?;
+unsafe {
+    k.launch((val.as_device_ptr(),), 1, 1, stream)?;
 }
 ```
 
