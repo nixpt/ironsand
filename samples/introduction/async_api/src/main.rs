@@ -8,8 +8,9 @@
 use cust::device::Device;
 use cust::event::{Event, EventFlags};
 use cust::function::{BlockSize, GridSize};
-use cust::launch;
-use cust::memory::{AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::kernel::KernelDescriptor;
+use cust::kernel_descriptor;
+use cust::memory::{AsyncCopyDestination, DeviceBuffer, DevicePointer, LockedBuffer};
 use cust::module::Module;
 use cust::prelude::EventStatus;
 use cust::stream::{Stream, StreamFlags};
@@ -35,9 +36,12 @@ fn main() -> Result<(), cust::error::CudaError> {
     println!("Device Name: {}", device.name().unwrap());
 
     let module = Module::from_ptx(PTX, &[]).expect("Module couldn't be init!");
-    let increment = module
-        .get_function("increment")
-        .expect("Kernel function not found!");
+
+    kernel_descriptor! {
+        pub unsafe fn increment(g_data: DevicePointer<u32>, inc_value: u32);
+    }
+
+    let increment = increment::load(&module).expect("Kernel function not found!");
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None).expect("Stream couldn't be init!");
 
     const N: usize = 16 * 1024 * 1024;
@@ -78,11 +82,9 @@ fn main() -> Result<(), cust::error::CudaError> {
     // Number of threads * number of blocks = total number of elements.
     // Hence there will not be any out-of-bounds issues.
     unsafe {
-        let result = launch!(increment<<<grids, blocks, 0, stream>>>(
-            device_a.as_device_ptr(),
-            value
-        ));
-        result.expect("Result of `increment` kernel did not process!");
+        increment
+            .launch(grids, blocks, 0, &stream, (device_a.as_device_ptr(), value))
+            .expect("Result of `increment` kernel did not process!");
     }
 
     // # Safety
