@@ -10,8 +10,9 @@ use cuda_std::glam::USizeVec2;
 use cust::device::Device;
 use cust::event::{Event, EventFlags};
 use cust::function::{BlockSize, GridSize};
-use cust::launch;
-use cust::memory::{AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::kernel::KernelDescriptor;
+use cust::kernel_descriptor;
+use cust::memory::{AsyncCopyDestination, DeviceBuffer, DevicePointer, LockedBuffer};
 use cust::module::Module;
 use cust::stream::{Stream, StreamFlags};
 
@@ -54,8 +55,18 @@ fn matrix_multiply(
     println!("Computing result using CUDA Kernel...");
 
     let module = Module::from_ptx(PTX, &[]).expect("Module couldn't be init!");
-    let matrix_mul_cuda = module
-        .get_function("matrix_mul_cuda")
+
+    kernel_descriptor! {
+        pub unsafe fn matrix_mul_cuda(
+            c: DevicePointer<f32>,
+            a: DevicePointer<f32>, a_len: usize,
+            b: DevicePointer<f32>, b_len: usize,
+            wa: usize,
+            wb: usize,
+        );
+    }
+
+    let matrix_mul_cuda = matrix_mul_cuda::load(&module)
         .expect("Kernel function not found!");
 
     unsafe {
@@ -65,15 +76,18 @@ fn matrix_multiply(
         // ```
         // For elements that have the type `*mut T` or `*const T`, we'll need to pass only the device pointer.
         // For elements that have the type `&[T]`, we must pass the device pointer as well as the length of the slice.
-        launch!(matrix_mul_cuda<<<grid, threads, 0, stream>>>(
-            d_c.as_device_ptr(),
-            d_a.as_device_ptr(),
-            d_a.len(),
-            d_b.as_device_ptr(),
-            d_b.len(),
-            dims_a.x,
-            dims_b.x
-        ))?;
+        matrix_mul_cuda.launch(
+            grid, threads, 0, &stream,
+            (
+                d_c.as_device_ptr(),
+                d_a.as_device_ptr(),
+                d_a.len(),
+                d_b.as_device_ptr(),
+                d_b.len(),
+                dims_a.x,
+                dims_b.x,
+            ),
+        )?;
     }
 
     println!("Done!");
@@ -87,15 +101,18 @@ fn matrix_multiply(
 
     for _ in 0..N_ITER {
         unsafe {
-            launch!(matrix_mul_cuda<<<grid, threads, 0, stream>>>(
-                d_c.as_device_ptr(),
-                d_a.as_device_ptr(),
-                d_a.len(),
-                d_b.as_device_ptr(),
-                d_b.len(),
-                dims_a.x,
-                dims_b.x,
-            ))?;
+            matrix_mul_cuda.launch(
+                grid, threads, 0, &stream,
+                (
+                    d_c.as_device_ptr(),
+                    d_a.as_device_ptr(),
+                    d_a.len(),
+                    d_b.as_device_ptr(),
+                    d_b.len(),
+                    dims_a.x,
+                    dims_b.x,
+                ),
+            )?;
         }
     }
 
