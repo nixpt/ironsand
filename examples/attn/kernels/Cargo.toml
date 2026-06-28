@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 cuda_std = { path = "../../../crates/cuda_std" }
+cust_core = { path = "../../../crates/cust_core" }
 
 [lib]
 crate-type = ["cdylib", "rlib"]

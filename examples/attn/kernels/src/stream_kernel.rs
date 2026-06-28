@@ -4,6 +4,7 @@
 use core::arch::asm;
 use cuda_std::GpuFloat;
 use cuda_std::kernel;
+use cust_core::DeviceCopy;
 
 // Op opcodes
 const OP_RMSNORM: u32 = 0;
@@ -16,6 +17,7 @@ const OP_STREAM_FFN_BLOCK: u32 = 11; // Sub-kernel: RmsNorm → GateUp → SiLU 
 /// Queue entry: one operation for the stream kernel to execute.
 /// Must be kept small (fits in registers).
 #[repr(C)]
+#[derive(DeviceCopy)]
 pub struct StreamOp {
     pub opcode: u32,
     pub n: u32,            // batch or vector size
@@ -28,6 +30,7 @@ pub struct StreamOp {
 
 /// Queue of ops for one token generation step.
 #[repr(C)]
+#[derive(DeviceCopy)]
 pub struct StreamQueue {
     pub ops: [StreamOp; 16],
     pub num_ops: u32,

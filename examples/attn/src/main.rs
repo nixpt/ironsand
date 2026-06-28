@@ -3,13 +3,14 @@
 use std::error::Error;
 
 use cust::event::{Event, EventFlags};
-use cust::launch;
-use cust::memory::{CopyDestination as _, DeviceBuffer};
+use cust::kernel::KernelDescriptor;
+use cust::kernel_descriptor;
+use cust::memory::{CopyDestination as _, DeviceBuffer, DevicePointer};
 use cust::module::Module;
 use cust::stream::{Stream, StreamFlags};
 use cust::util::SliceExt as _;
-use half::f16;
 use haiku_san::HaikuSan;
+use half::f16;
 use ndarray::Array2;
 use ndarray_rand::RandomExt as _;
 use ndarray_rand::rand_distr::Uniform;
@@ -19,6 +20,39 @@ const NUM_WARMUPS: usize = 3;
 const NUM_RUNS: usize = 50;
 
 static PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
+
+// ── Typed kernel descriptors ─────────────────────────────────────────────────
+
+kernel_descriptor! {
+    pub unsafe fn mma_f16_tile(
+        a: DevicePointer<u16>, a_len: usize,
+        b: DevicePointer<u16>, b_len: usize,
+        c: DevicePointer<f32>,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn flash_attn(
+        q: DevicePointer<u16>, q_len: usize,
+        k: DevicePointer<u16>, k_len: usize,
+        v: DevicePointer<u16>, v_len: usize,
+        o: DevicePointer<u16>,
+        l_seq: usize, s_seq: usize,
+        q_head_stride: usize, kv_head_stride: usize,
+    );
+}
+
+kernel_descriptor! {
+    pub unsafe fn flash_attn_gqa(
+        q: DevicePointer<u16>, q_len: usize,
+        k: DevicePointer<u16>, k_len: usize,
+        v: DevicePointer<u16>, v_len: usize,
+        o: DevicePointer<u16>,
+        l_seq: usize, s_seq: usize,
+        num_query_heads: usize, num_kv_heads: usize,
+    );
+}
+
 
 fn time<F: FnMut() -> Result<(), Box<dyn Error>>>(
     stream: &Stream,
@@ -79,12 +113,12 @@ fn run_mma_f16_spike(module: &Module, stream: &Stream) -> Result<(), Box<dyn Err
     let b_gpu = b_h16.as_slice().as_dbuf()?;
     let c_gpu = vec![0.0f32; M * N].as_slice().as_dbuf()?;
 
-    let f = module.get_function("mma_f16_tile")?;
+    let mma_f16_tile = mma_f16_tile::load(&module)?;
     unsafe {
-        launch!(f<<<1, 32, 0, stream>>>(
+        mma_f16_tile.launch(1, 32, 0, stream, (
             a_gpu.as_device_ptr(), a_gpu.len(),
             b_gpu.as_device_ptr(), b_gpu.len(),
-            c_gpu.as_device_ptr()
+            c_gpu.as_device_ptr(),
         ))?;
     }
     stream.synchronize()?;
@@ -97,7 +131,13 @@ fn run_mma_f16_spike(module: &Module, stream: &Stream) -> Result<(), Box<dyn Err
         // f16 mma accumulates in f32 — values are exact for these small integers.
         if (d_out[i] - d_ref[i]).abs() > 0.01 {
             if bad < 4 {
-                println!("  mismatch [{},{}] gpu={} cpu={}", i / N, i % N, d_out[i], d_ref[i]);
+                println!(
+                    "  mismatch [{},{}] gpu={} cpu={}",
+                    i / N,
+                    i % N,
+                    d_out[i],
+                    d_ref[i]
+                );
             }
             bad += 1;
         }
@@ -117,14 +157,7 @@ fn run_mma_f16_spike(module: &Module, stream: &Stream) -> Result<(), Box<dyn Err
 // ── Naive CPU attention reference ────────────────────────────────────────────
 
 /// O[L, Dh] = softmax(Q[L,Dh] · K[S,Dh]^T / √Dh) · V[S, Dh]
-fn naive_attn_cpu(
-    q: &[f32],
-    k: &[f32],
-    v: &[f32],
-    l: usize,
-    s: usize,
-    dh: usize,
-) -> Vec<f32> {
+fn naive_attn_cpu(q: &[f32], k: &[f32], v: &[f32], l: usize, s: usize, dh: usize) -> Vec<f32> {
     let scale = 1.0 / (dh as f32).sqrt();
     let mut o = vec![0.0f32; l * dh];
     for i in 0..l {
@@ -154,24 +187,14 @@ fn naive_attn_cpu(
 
 fn run_flash_attn(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
     // H=1 correctness + timing.
-    let shapes: &[(usize, usize)] = &[
-        (32, 32),
-        (64, 64),
-        (512, 512),
-        (1024, 1024),
-        (2048, 2048),
-    ];
+    let shapes: &[(usize, usize)] = &[(32, 32), (64, 64), (512, 512), (1024, 1024), (2048, 2048)];
     for &(l_seq, s_seq) in shapes {
         run_flash_attn_shape(module, stream, l_seq, s_seq, 1)?;
     }
 
     // Multi-head throughput (H=32, realistic transformer workload).
     println!("\n=== Flash attention H=32 throughput ===");
-    let mh_shapes: &[(usize, usize)] = &[
-        (512, 512),
-        (1024, 1024),
-        (2048, 2048),
-    ];
+    let mh_shapes: &[(usize, usize)] = &[(512, 512), (1024, 1024), (2048, 2048)];
     for &(l_seq, s_seq) in mh_shapes {
         run_flash_attn_shape(module, stream, l_seq, s_seq, 32)?;
     }
@@ -185,7 +208,10 @@ fn run_flash_attn_shape(
     s_seq: usize,
     num_heads: usize,
 ) -> Result<(), Box<dyn Error>> {
-    assert!(l_seq % 16 == 0 && s_seq % 16 == 0, "L and S must be multiples of 16");
+    assert!(
+        l_seq % 16 == 0 && s_seq % 16 == 0,
+        "L and S must be multiples of 16"
+    );
 
     // Generate f32 Q, K, V for head 0 (correctness check uses H=1).
     let q_f = Array2::<f32>::random((l_seq, DH), Uniform::new(-1.0f32, 1.0));
@@ -203,22 +229,38 @@ fn run_flash_attn_shape(
     };
 
     // Convert to f16. For H>1, replicate head-0 data across all heads.
-    let to_h16 = |v: &[f32]| -> Vec<u16> { v.iter().map(|&x| f16::from_f32(x).to_bits()).collect() };
+    let to_h16 =
+        |v: &[f32]| -> Vec<u16> { v.iter().map(|&x| f16::from_f32(x).to_bits()).collect() };
     let q_h16_head0 = to_h16(&q_flat);
     let k_h16_head0 = to_h16(&k_flat);
     let v_h16_head0 = to_h16(&v_flat);
 
     // [H, L/S, Dh] layout — replicate head-0 for all heads.
-    let q_h16: Vec<u16> = q_h16_head0.iter().copied().cycle().take(num_heads * l_seq * DH).collect();
-    let k_h16: Vec<u16> = k_h16_head0.iter().copied().cycle().take(num_heads * s_seq * DH).collect();
-    let v_h16: Vec<u16> = v_h16_head0.iter().copied().cycle().take(num_heads * s_seq * DH).collect();
+    let q_h16: Vec<u16> = q_h16_head0
+        .iter()
+        .copied()
+        .cycle()
+        .take(num_heads * l_seq * DH)
+        .collect();
+    let k_h16: Vec<u16> = k_h16_head0
+        .iter()
+        .copied()
+        .cycle()
+        .take(num_heads * s_seq * DH)
+        .collect();
+    let v_h16: Vec<u16> = v_h16_head0
+        .iter()
+        .copied()
+        .cycle()
+        .take(num_heads * s_seq * DH)
+        .collect();
 
     let q_gpu = q_h16.as_slice().as_dbuf()?;
     let k_gpu = k_h16.as_slice().as_dbuf()?;
     let v_gpu = v_h16.as_slice().as_dbuf()?;
     let o_gpu = DeviceBuffer::<u16>::zeroed(num_heads * l_seq * DH)?;
 
-    let f = module.get_function("flash_attn")?;
+    let flash_attn = flash_attn::load(&module)?;
     // 2D grid: x = query tiles (L/Br), y = heads.
     let grid_x = (l_seq / 16) as u32;
     let grid_y = num_heads as u32;
@@ -228,12 +270,12 @@ fn run_flash_attn_shape(
     let kv_head_stride = s_seq * DH;
     let run = || -> Result<(), Box<dyn Error>> {
         unsafe {
-            launch!(f<<<(grid_x, grid_y), BLOCK, 0, stream>>>(
+            flash_attn.launch((grid_x, grid_y), BLOCK, 0, stream, (
                 q_gpu.as_device_ptr(), q_gpu.len(),
                 k_gpu.as_device_ptr(), k_gpu.len(),
                 v_gpu.as_device_ptr(), v_gpu.len(),
                 o_gpu.as_device_ptr(),
-                l_seq, s_seq, q_head_stride, kv_head_stride
+                l_seq, s_seq, q_head_stride, kv_head_stride,
             ))?;
         }
         Ok(())
@@ -278,7 +320,9 @@ fn run_flash_attn_shape(
         for (&r, &g) in o_ref.iter().zip(&o_gpu_f) {
             if r.abs() > 0.1 {
                 let e = (r as f64 - g as f64).abs();
-                if e > max_abs_big { max_abs_big = e; }
+                if e > max_abs_big {
+                    max_abs_big = e;
+                }
             }
         }
 
@@ -293,7 +337,10 @@ fn run_flash_attn_shape(
                 if (o_ref[i] as f64 - o_gpu_f[i] as f64).abs() > 0.05 && shown < 4 {
                     println!(
                         "  mismatch [{},{}] ref={:.4} gpu={:.4}",
-                        i / DH, i % DH, o_ref[i], o_gpu_f[i]
+                        i / DH,
+                        i % DH,
+                        o_ref[i],
+                        o_gpu_f[i]
                     );
                     shown += 1;
                 }
@@ -357,7 +404,8 @@ fn run_flash_attn_gqa(module: &Module, stream: &Stream) -> Result<(), Box<dyn Er
         o
     };
 
-    let to_h16 = |v: &[f32]| -> Vec<u16> { v.iter().map(|&x| f16::from_f32(x).to_bits()).collect() };
+    let to_h16 =
+        |v: &[f32]| -> Vec<u16> { v.iter().map(|&x| f16::from_f32(x).to_bits()).collect() };
     let q_h16 = to_h16(&q_flat);
     let k_h16 = to_h16(&k_flat);
     let v_h16 = to_h16(&v_flat);
@@ -367,20 +415,20 @@ fn run_flash_attn_gqa(module: &Module, stream: &Stream) -> Result<(), Box<dyn Er
     let v_gpu = v_h16.as_slice().as_dbuf()?;
     let o_gpu = DeviceBuffer::<u16>::zeroed(num_query_heads * l_seq * DH)?;
 
-    let f = module.get_function("flash_attn_gqa")?;
+    let flash_attn_gqa = flash_attn_gqa::load(&module)?;
     let grid_x = (l_seq / 16) as u32;
     let grid_y = num_query_heads as u32;
     const BLOCK: u32 = 128;
 
     unsafe {
-        launch!(f<<<(grid_x, grid_y), BLOCK, 0, stream>>>(
+        flash_attn_gqa.launch((grid_x, grid_y), BLOCK, 0, stream, (
             q_gpu.as_device_ptr(), q_gpu.len(),
             k_gpu.as_device_ptr(), k_gpu.len(),
             v_gpu.as_device_ptr(), v_gpu.len(),
             o_gpu.as_device_ptr(),
             l_seq, s_seq,
             num_query_heads,
-            num_kv_heads
+            num_kv_heads,
         ))?;
     }
     stream.synchronize()?;
@@ -403,8 +451,10 @@ fn run_flash_attn_gqa(module: &Module, stream: &Stream) -> Result<(), Box<dyn Er
     }
 
     if bad == 0 {
-        println!("GQA [PASS] H={} G={} L={} S={} rel_err={:.2e}",
-            num_query_heads, num_kv_heads, l_seq, s_seq, max_err);
+        println!(
+            "GQA [PASS] H={} G={} L={} S={} rel_err={:.2e}",
+            num_query_heads, num_kv_heads, l_seq, s_seq, max_err
+        );
     } else {
         println!("GQA [FAIL] {bad} mismatches");
     }
@@ -461,7 +511,8 @@ fn run_mqa_test(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> 
         o
     };
 
-    let to_h16 = |v: &[f32]| -> Vec<u16> { v.iter().map(|&x| f16::from_f32(x).to_bits()).collect() };
+    let to_h16 =
+        |v: &[f32]| -> Vec<u16> { v.iter().map(|&x| f16::from_f32(x).to_bits()).collect() };
     let q_h16 = to_h16(&q_flat);
     let k_h16 = to_h16(&k_flat);
     let v_h16 = to_h16(&v_flat);
@@ -471,20 +522,20 @@ fn run_mqa_test(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> 
     let v_gpu = v_h16.as_slice().as_dbuf()?;
     let o_gpu = DeviceBuffer::<u16>::zeroed(num_query_heads * l_seq * DH)?;
 
-    let f = module.get_function("flash_attn_gqa")?;
+    let flash_attn_gqa = flash_attn_gqa::load(&module)?;
     let grid_x = (l_seq / 16) as u32;
     let grid_y = num_query_heads as u32;
     const BLOCK: u32 = 128;
 
     unsafe {
-        launch!(f<<<(grid_x, grid_y), BLOCK, 0, stream>>>(
+        flash_attn_gqa.launch((grid_x, grid_y), BLOCK, 0, stream, (
             q_gpu.as_device_ptr(), q_gpu.len(),
             k_gpu.as_device_ptr(), k_gpu.len(),
             v_gpu.as_device_ptr(), v_gpu.len(),
             o_gpu.as_device_ptr(),
             l_seq, s_seq,
             num_query_heads,
-            num_kv_heads
+            num_kv_heads,
         ))?;
     }
     stream.synchronize()?;
@@ -505,8 +556,10 @@ fn run_mqa_test(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> 
     }
 
     if bad == 0 {
-        println!("MQA [PASS] H={} G={} L={} S={} rel_err={:.2e}",
-            num_query_heads, num_kv_heads, l_seq, s_seq, max_err);
+        println!(
+            "MQA [PASS] H={} G={} L={} S={} rel_err={:.2e}",
+            num_query_heads, num_kv_heads, l_seq, s_seq, max_err
+        );
     } else {
         println!("MQA [FAIL] {bad} mismatches");
     }
