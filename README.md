@@ -51,6 +51,48 @@ To compile a kernel crate, enable the backend features on its `cuda_builder` bui
 cuda_builder = { workspace = true, default-features = false, features = ["rustc_codegen_nvvm", "llvm19"] }
 ```
 
+## Typed Kernel API (recommended)
+
+`cust` provides a compile-time-typed kernel handle, `Kernel<'a, Args>`, that encodes a kernel's
+parameter signature in the Rust type system. This catches wrong argument counts, wrong types, and
+wrong order at compile time rather than at runtime.
+
+**Before** — raw `launch!` macro (unchecked at compile time):
+
+```rust
+let func = module.get_function("vecadd")?;
+unsafe {
+    launch!(func<<<256, 128, 0, stream>>>(a, a_len, b, b_len, c, c_len))?;
+}
+```
+
+**After** — typed `Kernel` with a descriptor:
+
+```rust
+kernel_descriptor! {
+    pub unsafe fn vecadd(
+        a: DevicePointer<f32>, a_len: usize,
+        b: DevicePointer<f32>, b_len: usize,
+        c: DevicePointer<f32>
+    );
+}
+
+let vecadd = vecadd::load(&module)?;
+unsafe {
+    vecadd.launch(256, 128, 0, &stream, (a, a_len, b, b_len, c))?;
+}
+```
+
+Benefits:
+
+- **Compile-time safety**: the tuple passed to `launch` must exactly match the descriptor's `Args` type.
+- **Self-documenting**: the host-side declaration mirrors the device-side signature, making it obvious how to call the kernel.
+- **Occupancy queries**: `Kernel` forwards `suggested_launch_configuration`, `max_active_blocks_per_multiprocessor`, and `get_attribute` directly.
+- **Zero-cost**: a `Kernel` is just a phantom-type wrapper around `Function`; it compiles away.
+
+See the [Typed Kernels guide chapter](guide/src/guide/typed_kernels.md) for full details on
+`kernel_descriptor!`, `#[derive(KernelDescriptor)]`, multi-stream reuse, and raw-handle fallback.
+
 ## Documentation
 
 The original [Rust CUDA Guide](https://rust-gpu.github.io/rust-cuda/) remains the best reference for
