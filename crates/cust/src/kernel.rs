@@ -232,6 +232,53 @@ impl<'a, Args: KernelArgs> From<Kernel<'a, Args>> for Function<'a> {
     }
 }
 
+/// A compile-time descriptor for a kernel loaded from a [`Module`].
+///
+/// Types implementing this trait encode both the kernel's symbol name and its argument
+/// signature. This allows loading a [`Kernel`] without manually spelling out the tuple
+/// type every time.
+///
+/// # Deriving
+///
+/// The trait can be derived with `#[derive(KernelDescriptor)]` from `cust_derive`:
+///
+/// ```ignore
+/// use cust::prelude::*;
+///
+/// #[derive(KernelDescriptor)]
+/// #[kernel_name = "vecadd"]
+/// struct VecAdd(DevicePointer<f32>, usize, DevicePointer<f32>, usize, DevicePointer<f32>);
+/// ```
+///
+/// Or you can use the [`kernel_descriptor!`] declarative macro which accepts a
+/// function-like syntax:
+///
+/// ```ignore
+/// kernel_descriptor! {
+///     unsafe fn vecadd(
+///         a: DevicePointer<f32>, a_len: usize,
+///         b: DevicePointer<f32>, b_len: usize,
+///         c: DevicePointer<f32>
+///     );
+/// }
+/// ```
+pub trait KernelDescriptor {
+    /// The tuple type describing the kernel's argument signature.
+    type Args: KernelArgs;
+
+    /// The mangled (or `no_mangle`) symbol name of the kernel in the PTX module.
+    const NAME: &'static str;
+
+    /// Load the kernel from a module using the descriptor's name and type.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Module::get_function`] (e.g. `NotFound`).
+    fn load<'a>(module: &'a Module) -> CudaResult<Kernel<'a, Self::Args>> {
+        module.get_kernel(Self::NAME)
+    }
+}
+
 /// Convenience macro to load a typed kernel from a module.
 ///
 /// # Syntax
@@ -259,4 +306,80 @@ macro_rules! typed_kernel {
     ($module:expr, $name:expr => ($($arg_ty:ty),* $(,)?)) => {{
         $crate::kernel::Kernel::<($($arg_ty,)* )>::from_module($module, $name)
     }};
+}
+
+/// Declarative macro to declare a [`KernelDescriptor`] from a function signature.
+///
+/// This macro consumes a function-like declaration (no body required) and generates
+/// a unit struct plus a [`KernelDescriptor`] implementation. The argument types
+/// become the `Args` tuple.
+///
+/// By default the kernel symbol name is `stringify!($name)`. You can override it
+/// with `#[kernel_name = "..."]` placed anywhere among the attributes.
+///
+/// # Syntax
+///
+/// ```ignore
+/// kernel_descriptor! {
+///     $(#[$meta:meta])*
+///     $vis unsafe fn $name($arg_name: $arg_ty, ...);
+/// }
+/// ```
+///
+/// # Example
+///
+/// ```ignore
+/// use cust::prelude::*;
+///
+/// kernel_descriptor! {
+///     pub unsafe fn saxpy(
+///         x: DevicePointer<f32>,
+///         y: DevicePointer<f32>,
+///         a: f32,
+///         n: usize,
+///     );
+/// }
+///
+/// // With an explicit kernel name:
+/// kernel_descriptor! {
+///     #[allow(dead_code)]
+///     #[kernel_name = "vecadd_f32"]
+///     pub unsafe fn VecAddF32(
+///         a: DevicePointer<f32>, a_len: usize,
+///         b: DevicePointer<f32>, b_len: usize,
+///         c: DevicePointer<f32>
+///     );
+/// }
+/// ```
+#[macro_export]
+macro_rules! kernel_descriptor {
+    // Arm with explicit #[kernel_name = "..."] and attributes on both sides.
+    (
+        $(#[$meta_before:meta])*
+        #[kernel_name = $kernel_name:literal]
+        $(#[$meta_after:meta])*
+        $vis:vis unsafe fn $name:ident($($arg_name:ident: $arg_ty:ty),* $(,)?);
+    ) => {
+        $(#[$meta_before])*
+        $(#[$meta_after])*
+        $vis struct $name;
+
+        impl $crate::kernel::KernelDescriptor for $name {
+            type Args = ($($arg_ty,)*);
+            const NAME: &'static str = $kernel_name;
+        }
+    };
+    // Arm without explicit kernel_name — uses stringify!($name).
+    (
+        $(#[$meta:meta])*
+        $vis:vis unsafe fn $name:ident($($arg_name:ident: $arg_ty:ty),* $(,)?);
+    ) => {
+        $(#[$meta])*
+        $vis struct $name;
+
+        impl $crate::kernel::KernelDescriptor for $name {
+            type Args = ($($arg_ty,)*);
+            const NAME: &'static str = stringify!($name);
+        }
+    };
 }

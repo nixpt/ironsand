@@ -25,6 +25,92 @@ pub fn device_copy(input: BaseTokenStream) -> BaseTokenStream {
     BaseTokenStream::from(code)
 }
 
+/// Derive macro for [`KernelDescriptor`](::cust::kernel::KernelDescriptor).
+///
+/// The struct's fields (in declaration order) become the `Args` tuple type.
+/// The struct must carry a `#[kernel_name = "..."]` attribute specifying the
+/// mangled symbol name of the kernel in the PTX module.
+///
+/// # Example
+///
+/// ```ignore
+/// use cust::prelude::*;
+///
+/// #[derive(KernelDescriptor)]
+/// #[kernel_name = "vecadd"]
+/// struct VecAdd(DevicePointer<f32>, usize, DevicePointer<f32>, usize, DevicePointer<f32>);
+///
+/// let kernel = VecAdd::load(&module)?;
+/// ```
+#[proc_macro_derive(KernelDescriptor, attributes(kernel_name))]
+pub fn kernel_descriptor(input: BaseTokenStream) -> BaseTokenStream {
+    let input = syn::parse_macro_input!(input as DeriveInput);
+
+    // Reject generic structs — descriptors don't support generics.
+    if !input.generics.params.is_empty() {
+        return syn::Error::new_spanned(
+            &input.ident,
+            "KernelDescriptor does not support generic structs",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let kernel_name = match input
+        .attrs
+        .iter()
+        .find(|a| a.path().is_ident("kernel_name"))
+        .and_then(|a| {
+            if let syn::Meta::NameValue(nv) = &a.meta {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = &nv.value
+                {
+                    return Some(s.value());
+                }
+            }
+            None
+        }) {
+        Some(name) => name,
+        None => {
+            return syn::Error::new_spanned(
+                &input.ident,
+                "KernelDescriptor requires #[kernel_name = \"...\"] attribute",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    let ident = &input.ident;
+
+    let field_types: Vec<_> = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => fields.named.iter().map(|f| &f.ty).collect(),
+            Fields::Unnamed(fields) => fields.unnamed.iter().map(|f| &f.ty).collect(),
+            Fields::Unit => vec![],
+        },
+        _ => {
+            return syn::Error::new_spanned(
+                &input.ident,
+                "KernelDescriptor can only be derived for structs",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    let expanded = quote! {
+        impl ::cust::kernel::KernelDescriptor for #ident {
+            type Args = (#(#field_types,)*);
+            const NAME: &'static str = #kernel_name;
+        }
+    };
+
+    expanded.into()
+}
+
 use proc_macro::TokenStream as BaseTokenStream;
 
 fn impl_device_copy(input: &DeriveInput, import: TokenStream) -> TokenStream {

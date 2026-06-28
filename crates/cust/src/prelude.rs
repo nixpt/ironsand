@@ -9,7 +9,8 @@ pub use crate::device::Device;
 pub use crate::event::{Event, EventFlags, EventStatus};
 pub use crate::external::*;
 pub use crate::function::Function;
-pub use crate::kernel::Kernel;
+pub use crate::kernel::{Kernel, KernelDescriptor};
+pub use crate::kernel_descriptor;
 pub use crate::launch;
 pub use crate::memory::{
     CopyDestination, DeviceBuffer, DevicePointer, DeviceSlice, DeviceVariable, UnifiedBuffer,
@@ -18,3 +19,7 @@ pub use crate::module::Module;
 pub use crate::stream::{Stream, StreamFlags};
 pub use crate::typed_kernel;
 pub use crate::util::*;
+
+// Re-export the derive macro so `#[derive(KernelDescriptor)]` works after `use cust::prelude::*;`.
+// The derive macro and the trait share a name but live in different namespaces.
+pub use cust_derive::KernelDescriptor;

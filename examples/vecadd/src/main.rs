@@ -7,6 +7,27 @@ use std::io::Write;
 use std::os::raw::c_uint;
 use std::ptr;
 
+// ------------------------------------------------------------------
+// NEW: KernelDescriptor eliminates manual tuple typing.
+//
+// Two styles are supported:
+//   1. #[derive(KernelDescriptor)] on a tuple struct (shown below).
+//   2. kernel_descriptor! { unsafe fn name(...); } declarative macro.
+//
+// Both generate the same thing — a typed Kernel<Args> loaded by name.
+// ------------------------------------------------------------------
+
+/// Derive style: the tuple struct's fields become the kernel's argument tuple.
+#[derive(KernelDescriptor)]
+#[kernel_name = "vecadd"]
+struct VecAdd(
+    DevicePointer<f32>,
+    usize,
+    DevicePointer<f32>,
+    usize,
+    DevicePointer<f32>,
+);
+
 /// How many numbers to generate and add together.
 const NUMBERS_LEN: usize = 100_000;
 
@@ -160,17 +181,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     let out_buf = step!("DeviceBuffer::from out", out.as_slice().as_dbuf());
 
     // ------------------------------------------------------------------
-    // NEW: Typed kernel handle API (compile-time-verified signature)
+    // NEW: Typed kernel handle via KernelDescriptor (no manual tuple)
     // ------------------------------------------------------------------
     use cust::kernel::Kernel;
-    let vecadd_typed: Kernel<(
+
+    let vecadd_typed: Kernel<_> = step!(
+        "VecAdd::load [KernelDescriptor]",
+        VecAdd::load(&module)
+    );
+
+    // Manual tuple typing is still supported for ad-hoc use.
+    let _vecadd_manual: Kernel<(
         DevicePointer<f32>,
         usize,
         DevicePointer<f32>,
         usize,
         DevicePointer<f32>,
     )> = step!(
-        "Module::get_kernel(\"vecadd\") [typed]",
+        "Module::get_kernel(\"vecadd\") [manual tuple]",
         module.get_kernel("vecadd")
     );
 

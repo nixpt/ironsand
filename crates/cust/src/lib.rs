@@ -76,6 +76,7 @@ mod texture;
 pub mod util;
 
 pub use cust_derive::DeviceCopy;
+pub use cust_derive::KernelDescriptor;
 
 use crate::context::{Context, ContextFlags};
 use crate::device::Device;
