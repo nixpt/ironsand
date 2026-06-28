@@ -25,7 +25,7 @@ In CUDA terminology:
   features
 - **Real architectures** (`sm_XX`) represent actual GPU hardware
 
-Rust CUDA works exclusively with virtual architectures since it only generates PTX. The
+ironsand works exclusively with virtual architectures since it only generates PTX. The
 `NvvmArch::ComputeXX` enum values correspond to CUDA's virtual architectures.
 
 ## Using target features
@@ -217,9 +217,14 @@ If you encounter errors about missing functions or features:
 
 ## Runtime behavior
 
-Again, Rust CUDA **only generates PTX**, not pre-compiled GPU binaries
+Again, ironsand **only generates PTX**, not pre-compiled GPU binaries
 ("[fatbinaries](https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/#fatbinaries)").
 This PTX is then JIT-compiled by the CUDA driver at _runtime_.
+
+Regardless of which `#[cfg]` code path was compiled into the PTX, the host-side loading and
+launching code stays the same. We recommend using the typed [`Kernel`](../../kernel/struct.Kernel.html)
+API (see [Typed Kernels](typed_kernels.html)) so that the argument signature is checked at
+compile time even when the kernel's body changes between GPU generations.
 
 For more details, see [NVIDIA's documentation on GPU
 compilation](https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/#gpu-compilation)

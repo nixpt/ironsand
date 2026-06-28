@@ -32,13 +32,13 @@ any language. For an assembly format, PTX is fairly user-friendly.
 PTX can be run on NVIDIA GPUs using the driver API or runtime API. Those APIs will convert the PTX
 into a final format called SASS which is register allocated and executed on the GPU.
 
-## The Rust CUDA pipeline
+## The ironsand pipeline
 
-The Rust CUDA project replaces NVCC with a custom rustc backend. The pipeline looks like this:
+The ironsand project replaces NVCC with a custom rustc backend. The pipeline looks like this:
 
 ```
 +---------------------------------------------------------------------+
-|                        Rust CUDA Pipeline                           |
+|                         ironsand Pipeline                           |
 |                                                                     |
 |  Host code (.rs)           GPU kernel code (.rs)                    |
 |       |                          |                                  |
@@ -70,4 +70,6 @@ The Rust CUDA project replaces NVCC with a custom rustc backend. The pipeline lo
 - **`cuda_builder`** is a build-script helper that drives `rustc_codegen_nvvm` from a host
   crate's `build.rs`, producing a `.ptx` file that is embedded in the host binary.
 - **`cust`** is the host-side safe wrapper around the CUDA Driver API, used to load modules,
-  allocate GPU memory, launch kernels, and synchronize results.
+  allocate GPU memory, launch kernels, and synchronize results. `cust` also provides the typed
+  [`Kernel`](../../kernel/struct.Kernel.html) API, which encodes a kernel's parameter signature
+  in the Rust type system for compile-time launch safety (see [Typed Kernels](../guide/typed_kernels.html)).
