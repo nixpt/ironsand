@@ -125,7 +125,7 @@ impl_kernel_args!(A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11);
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Kernel<'a, Args: KernelArgs> {
     func: Function<'a>,
     _marker: PhantomData<Args>,

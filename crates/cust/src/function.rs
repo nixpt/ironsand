@@ -253,7 +253,7 @@ pub enum FunctionAttribute {
 }
 
 /// Handle to a global kernel function.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Function<'a> {
     inner: CUfunction,
     module: PhantomData<&'a Module>,
