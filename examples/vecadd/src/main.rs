@@ -159,24 +159,65 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut out = vec![0.0f32; NUMBERS_LEN];
     let out_buf = step!("DeviceBuffer::from out", out.as_slice().as_dbuf());
 
-    let vecadd = step!(
-        "Module::get_function(\"vecadd\")",
-        module.get_function("vecadd")
+    // ------------------------------------------------------------------
+    // NEW: Typed kernel handle API (compile-time-verified signature)
+    // ------------------------------------------------------------------
+    use cust::kernel::Kernel;
+    let vecadd_typed: Kernel<(
+        DevicePointer<f32>,
+        usize,
+        DevicePointer<f32>,
+        usize,
+        DevicePointer<f32>,
+    )> = step!(
+        "Module::get_kernel(\"vecadd\") [typed]",
+        module.get_kernel("vecadd")
     );
 
     let (_, block_size) = step!(
         "suggested_launch_configuration",
-        vecadd.suggested_launch_configuration(0, 0.into())
+        vecadd_typed.suggested_launch_configuration(0, 0.into())
     );
 
     let grid_size = (NUMBERS_LEN as u32).div_ceil(block_size);
 
     sayln!("using {grid_size} blocks and {block_size} threads per block");
 
-    eprintln!("[vecadd] launching kernel ...");
+    eprintln!("[vecadd] launching kernel (typed handle) ...");
+    unsafe {
+        vecadd_typed
+            .launch(
+                grid_size,
+                block_size,
+                0,
+                &stream,
+                (
+                    lhs_gpu.as_device_ptr(),
+                    lhs_gpu.len(),
+                    rhs_gpu.as_device_ptr(),
+                    rhs_gpu.len(),
+                    out_buf.as_device_ptr(),
+                ),
+            )
+            .map_err(|e| {
+                eprintln!("[vecadd] typed launch FAILED: {e:?}");
+                e
+            })?;
+    }
+    eprintln!("[vecadd] typed launch queued ok");
+
+    // ------------------------------------------------------------------
+    // ORIGINAL: Raw Function + launch! macro (still fully supported)
+    // ------------------------------------------------------------------
+    let vecadd_raw = step!(
+        "Module::get_function(\"vecadd\") [raw]",
+        module.get_function("vecadd")
+    );
+
+    eprintln!("[vecadd] launching kernel (raw handle) ...");
     unsafe {
         launch!(
-            vecadd<<<grid_size, block_size, 0, stream>>>(
+            vecadd_raw<<<grid_size, block_size, 0, stream>>>(
                 lhs_gpu.as_device_ptr(),
                 lhs_gpu.len(),
                 rhs_gpu.as_device_ptr(),
@@ -185,11 +226,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             )
         )
         .map_err(|e| {
-            eprintln!("[vecadd] launch FAILED: {e:?}");
+            eprintln!("[vecadd] raw launch FAILED: {e:?}");
             e
         })?;
     }
-    eprintln!("[vecadd] launch queued ok");
+    eprintln!("[vecadd] raw launch queued ok");
 
     step!("stream.synchronize", stream.synchronize());
 

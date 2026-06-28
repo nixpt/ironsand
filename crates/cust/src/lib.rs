@@ -60,6 +60,7 @@ pub mod error;
 pub mod event;
 pub mod external;
 pub mod function;
+pub mod kernel;
 // WIP
 pub mod context;
 #[allow(warnings)]

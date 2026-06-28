@@ -418,6 +418,36 @@ impl Module {
         }
     }
 
+    /// Get a compile-time-typed kernel handle from this module.
+    ///
+    /// `Args` is a tuple type describing the kernel's parameter signature. Each element
+    /// must implement [`DeviceCopy`](crate::memory::DeviceCopy).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use cust::*;
+    /// # use std::error::Error;
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// # let _ctx = quick_init()?;
+    /// use cust::module::Module;
+    /// use cust::kernel::Kernel;
+    /// use std::ffi::CString;
+    ///
+    /// let ptx = CString::new(include_str!("../resources/add.ptx"))?;
+    /// let module = Module::load_from_string(&ptx)?;
+    /// let kernel: Kernel<(DevicePointer<f32>, DevicePointer<f32>, DevicePointer<f32>, usize)> =
+    ///     module.get_kernel("sum")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn get_kernel<'a, Args: crate::kernel::KernelArgs>(
+        &'a self,
+        name: &str,
+    ) -> CudaResult<crate::kernel::Kernel<'a, Args>> {
+        crate::kernel::Kernel::from_module(self, name)
+    }
+
     // Get the inner `CUmodule` from the `Module`. If you use this handle elsewhere,
     // make sure not to use it after the module has been dropped. Or ManuallyDrop the struct to be safe.
     pub fn as_inner(&self) -> driver_sys::CUmodule {
