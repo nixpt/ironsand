@@ -62,7 +62,7 @@ wrong order at compile time rather than at runtime.
 ```rust
 let func = module.get_function("vecadd")?;
 unsafe {
-    launch!(func<<<256, 128, 0, stream>>>(a, a_len, b, b_len, c, c_len))?;
+    launch!(func<<<256, 128, 0, stream>>>(a, a_len, b, b_len, c))?;
 }
 ```
 
