@@ -432,6 +432,7 @@ impl Module {
     /// # let _ctx = quick_init()?;
     /// use cust::module::Module;
     /// use cust::kernel::Kernel;
+    /// use cust::memory::DevicePointer;
     /// use std::ffi::CString;
     ///
     /// let ptx = CString::new(include_str!("../resources/add.ptx"))?;

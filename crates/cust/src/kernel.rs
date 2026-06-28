@@ -11,6 +11,8 @@
 //! use cust::kernel::Kernel;
 //!
 //! # fn demo(module: &Module, stream: &Stream) -> cust::error::CudaResult<()> {
+//! # let a_ptr = DevicePointer::null();
+//! # let b_ptr = DevicePointer::null();
 //! // Load a kernel with a known signature: two f32 device pointers, a scalar, and a length.
 //! let saxpy: Kernel<(DevicePointer<f32>, DevicePointer<f32>, f32, usize)> =
 //!     module.get_kernel("saxpy")?;
@@ -118,6 +120,11 @@ impl_kernel_args!(A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13);
 /// use cust::kernel::Kernel;
 ///
 /// # fn demo(module: &Module, stream: &Stream) -> cust::error::CudaResult<()> {
+/// # let a = DevicePointer::null();
+/// # let a_len = 0usize;
+/// # let b = DevicePointer::null();
+/// # let b_len = 0usize;
+/// # let c = DevicePointer::null();
 /// let vecadd: Kernel<(DevicePointer<f32>, usize, DevicePointer<f32>, usize, DevicePointer<f32>)> =
 ///     module.get_kernel("vecadd")?;
 ///
