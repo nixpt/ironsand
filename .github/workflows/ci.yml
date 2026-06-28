@@ -1,0 +1,210 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ------------------------------------------------------------------
+  # Format check — fast, no dependencies needed.
+  # ------------------------------------------------------------------
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-04-02
+          components: rustfmt
+
+      - run: cargo fmt --check
+
+  # ------------------------------------------------------------------
+  # Clippy on crates that compile without a GPU.
+  # ------------------------------------------------------------------
+  clippy:
+    runs-on: ubuntu-latest
+    needs: [fmt]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-04-02
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy — host-only crates
+        run: |
+          cargo clippy -p haiku_san --all-targets -- -D warnings
+          cargo clippy -p cust_core --all-targets -- -D warnings
+          cargo clippy -p cust_derive --all-targets -- -D warnings
+          cargo clippy -p ptx --all-targets -- -D warnings
+          cargo clippy -p ptx_compiler --all-targets -- -D warnings
+          cargo clippy -p nvvm --all-targets -- -D warnings
+
+  # ------------------------------------------------------------------
+  # Unit tests for crates that run without a GPU.
+  # ------------------------------------------------------------------
+  test-host:
+    runs-on: ubuntu-latest
+    needs: [fmt]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-04-02
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test — host-only crates
+        run: |
+          cargo test -p haiku_san
+          cargo test -p cust_core
+          cargo test -p cust_derive
+
+  # ------------------------------------------------------------------
+  # Doc tests — compile-only on CPU runners.
+  #
+  # Many doc tests call quick_init() which needs a real CUDA driver
+  # context.  On CPU-only runners we compile them (to prove the
+  # examples are still correct) but skip execution.
+  # ------------------------------------------------------------------
+  test-cust-doc:
+    runs-on: ubuntu-latest
+    needs: [fmt]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-04-02
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install CUDA toolkit (for linking)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nvidia-cuda-toolkit
+
+      - name: Find CUDA stubs and set RUSTFLAGS
+        run: |
+          # Discover where the CUDA driver stubs live on this runner.
+          for d in /usr/lib/x86_64-linux-gnu/stubs \
+                   /usr/local/cuda/lib64/stubs   \
+                   /usr/lib/x86_64-linux-gnu; do
+            if [ -f "$d/libcuda.so" ] || [ -f "$d/libcuda.so.1" ]; then
+              echo "CUDA_STUBS=$d" >> "$GITHUB_ENV"
+              echo "Found CUDA stubs at $d"
+              break
+            fi
+          done
+          if [ -z "${CUDA_STUBS:-}" ]; then
+            echo "No CUDA stubs found; linking may fail."
+          fi
+
+      - name: Compile doc tests — cust
+        env:
+          RUSTFLAGS: "-L ${{ env.CUDA_STUBS }}"
+        run: cargo test -p cust --doc --no-run
+
+  # ------------------------------------------------------------------
+  # Build the mdBook guide.
+  # ------------------------------------------------------------------
+  guide:
+    runs-on: ubuntu-latest
+    needs: [fmt]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-04-02
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install mdbook
+        run: cargo install mdbook --locked
+
+      - name: Build guide
+        run: cd guide && mdbook build
+
+  # ------------------------------------------------------------------
+  # Full build check with LLVM 19 + CUDA stubs.
+  #
+  # This job installs LLVM 19 and the CUDA toolkit so that:
+  #   - rustc_codegen_nvvm can link against libLLVM-19
+  #   - cust_raw can link against libcuda.so stubs
+  #
+  # It does NOT run GPU kernels (no physical GPU on standard runners).
+  # For GPU runtime tests, use a self-hosted runner with an NVIDIA GPU.
+  # ------------------------------------------------------------------
+  build-cuda:
+    runs-on: ubuntu-24.04
+    needs: [fmt]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-04-02
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install LLVM 19
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          sudo add-apt-repository "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-19-dev libllvm19 llvm-19-tools clang-19
+
+      - name: Install CUDA toolkit
+        run: |
+          sudo apt-get install -y nvidia-cuda-toolkit
+
+      - name: Find CUDA stubs and set RUSTFLAGS
+        run: |
+          for d in /usr/lib/x86_64-linux-gnu/stubs \
+                   /usr/local/cuda/lib64/stubs   \
+                   /usr/lib/x86_64-linux-gnu; do
+            if [ -f "$d/libcuda.so" ] || [ -f "$d/libcuda.so.1" ]; then
+              echo "CUDA_STUBS=$d" >> "$GITHUB_ENV"
+              echo "Found CUDA stubs at $d"
+              break
+            fi
+          done
+          if [ -z "${CUDA_STUBS:-}" ]; then
+            echo "WARNING: No CUDA stubs found; linking may fail."
+          fi
+
+      - name: Build — rustc_codegen_nvvm
+        env:
+          LLVM_CONFIG_19: /usr/lib/llvm-19/bin/llvm-config
+          RUSTFLAGS: "-L ${{ env.CUDA_STUBS }}"
+        run: cargo build -p rustc_codegen_nvvm --features llvm19
+
+      - name: Build — examples
+        env:
+          LLVM_CONFIG_19: /usr/lib/llvm-19/bin/llvm-config
+          RUSTFLAGS: "-L ${{ env.CUDA_STUBS }}"
+        run: cargo build -p gemm -p vecadd -p matmul -p async_api
+
+      - name: Build — compiletests
+        env:
+          LLVM_CONFIG_19: /usr/lib/llvm-19/bin/llvm-config
+          RUSTFLAGS: "-L ${{ env.CUDA_STUBS }}"
+        run: cargo build -p compiletests
