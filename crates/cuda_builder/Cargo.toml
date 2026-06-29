@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["Riccardo D'Ambrosio <rdambrosio016@gmail.com>", "The rust-gpu Authors"]
 license = "MIT OR Apache-2.0"
 description = "Builder for easily building rustc_codegen_nvvm crates"
-repository = "https://github.com/Rust-GPU/rust-cuda"
+repository = "https://github.com/nixpt/ironsand"
 readme = "../../README.md"
 
 [package.metadata.docs.rs]
@@ -22,6 +22,10 @@ rustc_codegen_nvvm = ["dep:rustc_codegen_nvvm"]
 # when the optional dep is disabled, the build script's nested `cargo build -p
 # rustc_codegen_nvvm` reads `cfg(feature = "llvm19")` here and forwards it.
 llvm19 = ["nvvm/llvm19", "rustc_codegen_nvvm?/llvm19"]
+# Build the backend against LLVM 20 (experimental; mutually-exclusive with
+# llvm19 — use `--no-default-features --features llvm20` at the example level
+# to avoid activating both llvm19 and llvm20 simultaneously).
+llvm20 = ["rustc_codegen_nvvm?/llvm20"]
 
 [dependencies]
 rustc_codegen_nvvm = { version = "0.3", path = "../rustc_codegen_nvvm", optional = true }
