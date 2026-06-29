@@ -374,8 +374,10 @@ unsafe fn dce_pass(module: &Module) {
 
     // LLVM 20/22: rehydrate the legacy-PM `globaldce` pass through the name
     // registry (the `LLVMAddGlobalDCEPass` C entrypoint was removed in LLVM 17).
-    // Keep the literal in scope so a future typo can't drift from the length arg.
-    const _: usize = b"globaldce".len();
+    // Tie the byte-string length to the explicit `9` arg below so a typo in
+    // either side fails at compile time rather than silently mis-pointing the
+    // pass lookup.
+    static_assertions::const_assert_eq!(b"globaldce".len(), 9);
     #[cfg(any(feature = "llvm20", feature = "llvm22"))]
     unsafe {
         let pass_manager = LLVMCreatePassManager();

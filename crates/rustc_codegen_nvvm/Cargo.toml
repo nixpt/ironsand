@@ -8,7 +8,7 @@ authors = [
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "A codegen backend for Rustc which targets the libnvvm CUDA library"
-repository = "https://github.com/Rust-GPU/rust-cuda"
+repository = "https://github.com/nixpt/ironsand"
 readme = "../../README.md"
 
 [lib]
@@ -17,6 +17,8 @@ crate-type = ["dylib"]
 [features]
 default = []
 llvm19 = []
+llvm20 = []
+llvm22 = []
 
 [dependencies]
 nvvm = { version = "0.1", path = "../nvvm" }
@@ -34,6 +36,11 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 rustc_codegen_nvvm_macros = { version = "0.1", path = "../rustc_codegen_nvvm_macros" }
 smallvec = { version = "1.14.0", features = ["union", "may_dangle"] }
 itertools = "0.14.0"
+# Compile-time literal-length sentinels (see `src/nvvm.rs`). Lives in
+# `[dependencies]`, not `[dev-dependencies]` — cargo excludes dev-deps from
+# `cargo build` of a dylib target (this crate is loaded by host rustc via
+# `-Zcodegen-backend`).
+static_assertions = "1.1"
 
 [build-dependencies]
 build-helper = "0.1.1"
