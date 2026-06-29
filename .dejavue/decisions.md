@@ -99,3 +99,71 @@ Needed for flash-attention prefill QK^T and PV GEMMs. Same asm! pattern as int8 
 Reason:
 First correct flash-attn in Rust→PTX. 1 warp/block, online softmax (group shfl XOR 1+2), V transposed to smem. L2-rel=3.5e-4 (f16 noise). Next: ldmatrix + multi-warp for real throughput.
 
+
+## 2026-06-29T00:39:34-05:00 — [TACTICAL] static_assertions::const_assert_eq! discipline fully unified across dce_pass audit pair
+
+Reason:
+The dce_pass audit pair (FFI-pass-name compile-time integrity, tying the
+production `b"globaldce"` literal to LLVM's name registry used by
+`LLVMRustFindAndCreatePass`) now uses ONE macro — `static_assertions::
+const_assert_eq!` — across all three surfaces:
+
+  - Production site: `crates/rustc_codegen_nvvm/src/nvvm.rs::dce_pass`
+  - Trybuild synthetics: `crates/cust/tests/ui/dce_pass_literal/{pass,fail}_*.rs`
+  - CI `.stderr` (auto-blessed, mirrors the actual production diagnostic verbatim)
+
+A length-mismatch typo on `GLOBAL_DCE_PASS_NAME` will fire at compile time
+BOTH during `cargo check -p rustc_codegen_nvvm` (production site) AND during
+`cargo test -p cust --test dce_pass_literal_contract` (trybuild pin). The
+two surfaces no longer have a doc-comment bridge explaining intentional
+divergence — they share the same macro, by design.
+
+This is the landing-pad summary for the audit trio + extensions. Future
+maintainers reading this entry should NOT have to reconstruct the chain
+from `git log`:
+
+  f1c9f21   const-literal centralisation: `b"globaldce"` -> `GLOBAL_DCE_PASS_NAME`
+            module-level const (the pair's seed)
+  c15187b   AsCCharPtr trait-level typed-byte-count contract — the OTHER leg of
+            the pair; documents the runtime `&str` path so the const-literal
+            path gets a sister invariant on its complementary surface
+  0d2d72c   trybuild UI pin setup — created `crates/cust/tests/ui/dce_pass_literal/`
+            + the original runner with the doc-comment bridge (later replaced
+            by 82e5683's single-macro promotion)
+  78a87fa   audit-trio UNBLOCK: fix rustc-nightly drift in back.rs/init.rs (the
+            precondition that makes the trio executable end-to-end; pre-this
+            commit `cargo check` returned RC=101 on both --features llvm19
+            and --no-default-features --features llvm20)
+  113b052   breadcrumb-tighten on `nvvm.rs::dce_pass`
+  669f263   reviewer-revised breadcrumb (preserves `grep "trybuild pin"` anchor)
+  82e5683   synthetics use `static_assertions::const_assert_eq!` verbatim;
+            `.stderr` re-blessed; toolchain-pin note added in runner
+  6bfc890   propagate the toolchain-pin breadcrumb to the second trybuild
+            harness `kernel_descriptor_derive.rs`
+  d5fd038   dwarf_const discipline extended — SEPARATE concern (gimli CRIU
+            constant fidelity inside a local `macro_rules!` body); same macro,
+            different invariant; uses absolute path because macro_rules bodies
+            resolve identifiers at the call site
+  4a7ab4d   comment condense on d5fd038 (reviewer Concern 1)
+
+Future tweak surface: any new compile-time length sentinel in this codebase
+should follow the SAME triple pattern — module-level const +
+`static_assertions::const_assert_eq!` + (where applicable) a trybuild
+synthetic version + a `.stderr` re-bless pass. A regression that touches
+only one surface is detectable via the other two.
+
+Rejected alternatives:
+- **keep bare std-lib `const _: () = assert!(...)` form for synthetics**: left
+  a fidelity gap between the synthetic production and the actual diagnostic
+  (different macro emits different error format). The doc-comment bridge we
+  removed carried that explanation; self-mirroring removes the bridge entirely.
+- **different macros per surface (e.g. `assert!` at production, `static_assertions`
+  at test)**: doubles the verification surface — if a future change on one side
+  diverges from the other, neither side catches the drift. Single-macro is the
+  only pair that survives a macro-wording drift in a new rustc version.
+- **consume the existing const-literal at runtime to detect drift**: too late;
+  the whole point of the trio is that the FFI call gets a literal whose length
+  comes from the `static_assertions::const_assert_eq!` to LLVM's name registry;
+  catching the drift at compile time prevents the broken literal from ever
+  reaching `LLVMRustFindAndCreatePass`.
+
