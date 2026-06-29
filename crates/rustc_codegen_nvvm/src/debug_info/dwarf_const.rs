@@ -12,7 +12,9 @@ macro_rules! declare_constant {
         pub(crate) const $name: $type = ::gimli::constants::$name.0 as $type;
 
         // Assert that as-cast probably hasn't changed the value.
-        const _: () = assert!($name as i128 == ::gimli::constants::$name.0 as i128);
+        // Absolute path: macro_rules bodies resolve at the call site;
+        // `dwarf_const.rs` has no `use static_assertions;` in scope.
+        ::static_assertions::const_assert_eq!($name as i128, ::gimli::constants::$name.0 as i128);
     };
 }
 
