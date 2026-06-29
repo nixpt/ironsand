@@ -142,6 +142,19 @@ from `git log`:
             precondition that makes the trio executable end-to-end; pre-this
             commit `cargo check` returned RC=101 on both --features llvm19
             and --no-default-features --features llvm20)
+  eb90482   consts.rs:18 follow-up (the user-named single-site fix) --
+            migrated `mono::MonoItem` inside the nested
+            `use rustc_middle::{...}` block at this file's import line to
+            `mir::mono::MonoItem`. The original 78a87fa commit missed this
+            site because it sat inside a nested-use block (the audit-trio's
+            grep only flagged top-level `use rustc_middle::mono::*` lines).
+  56a8474   audit-trio UNBLOCK SWEEP (the 3-file completion) -- bundled
+            the 3 sibling sites that 78a87fa ALSO missed into one sweep
+            commit: override_fns.rs:13 (`mono::{MonoItem, MonoItemData,
+            Visibility}` -> `mir::mono::{...}`), mono_item.rs:11
+            (`mono::Visibility` -> `mir::mono::Visibility`), and
+            context.rs:30 (`mono::CodegenUnit` inside a nested-use block
+            -> `mir::mono::CodegenUnit`).
   113b052   breadcrumb-tighten on `nvvm.rs::dce_pass`
   669f263   reviewer-revised breadcrumb (preserves `grep "trybuild pin"` anchor)
   82e5683   synthetics use `static_assertions::const_assert_eq!` verbatim;
