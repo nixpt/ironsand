@@ -382,7 +382,7 @@ unsafe fn dce_pass(module: &Module) {
     // LLVM 20/22 path; rehydrate the legacy-PM `globaldce` pass via LLVM's
     // name registry (`LLVMAddGlobalDCEPass` C entrypoint removed in LLVM 17).
     // See `GLOBAL_DCE_PASS_NAME` for the byte-slice/c-string rationale.
-    // See `crates/cust/tests/dce_pass_literal_contract.rs` for the trybuild pin.
+    // See `crates/cust/tests/dce_pass_literal_contract.rs` for the trybuild pin (compile-time typo-detection).
     static_assertions::const_assert_eq!(GLOBAL_DCE_PASS_NAME.len(), 9);
     #[cfg(any(feature = "llvm20", feature = "llvm22"))]
     unsafe {
