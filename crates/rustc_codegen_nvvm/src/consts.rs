@@ -15,8 +15,8 @@ use rustc_middle::ty::{self, Instance, Ty};
 use rustc_middle::{
     bug,
     middle::codegen_fn_attrs::{CodegenFnAttrFlags, CodegenFnAttrs},
-    mono::MonoItem,
     mir::interpret::{InitChunk, Scalar as InterpScalar},
+    mir::mono::MonoItem,
     span_bug,
 };
 use tracing::trace;
