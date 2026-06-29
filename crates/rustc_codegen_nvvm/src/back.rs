@@ -360,6 +360,7 @@ pub(crate) unsafe fn optimize(
             let mpm = llvm::LLVMCreatePassManager();
 
             let addpass = |pass_name: &str| {
+                // Typed-byte-count contract — see `AsCCharPtr`'s # Invariant in `src/common.rs`.
                 let pass =
                     llvm::LLVMRustFindAndCreatePass(pass_name.as_c_char_ptr(), pass_name.len());
                 if pass.is_none() {
