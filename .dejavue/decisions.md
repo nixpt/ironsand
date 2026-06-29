@@ -130,6 +130,14 @@ from `git log`:
   0d2d72c   trybuild UI pin setup — created `crates/cust/tests/ui/dce_pass_literal/`
             + the original runner with the doc-comment bridge (later replaced
             by 82e5683's single-macro promotion)
+  <!-- MARKER: trio-vs-unblock boundary. The trio foundation (f1c9f21 +
+       c15187b + 0d2d72c) and the trio unblock (78a87fa) are two logically
+       distinct phases — the trio establishes the FFI-pass-name + trybuild
+       synthesis + AsCCharPtr contracts; 78a87fa is the rustc-nightly-drift
+       fix that makes the trio executable end-to-end. If a future maintainer
+       conflates them as one merged list, insert a single blank line
+       ABOVE this comment to visually separate the trio from the unblock.
+       Wording unchanged; pure layout micro-tweak. -->
   78a87fa   audit-trio UNBLOCK: fix rustc-nightly drift in back.rs/init.rs (the
             precondition that makes the trio executable end-to-end; pre-this
             commit `cargo check` returned RC=101 on both --features llvm19
