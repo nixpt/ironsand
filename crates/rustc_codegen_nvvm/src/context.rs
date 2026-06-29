@@ -27,7 +27,7 @@ use rustc_middle::ty::layout::{FnAbiOfHelpers, LayoutOfHelpers};
 use rustc_middle::ty::{Ty, TypeVisitableExt};
 use rustc_middle::{bug, span_bug, ty};
 use rustc_middle::{
-    mono::CodegenUnit,
+    mir::mono::CodegenUnit,
     ty::{Instance, TyCtxt},
 };
 use rustc_session::Session;
