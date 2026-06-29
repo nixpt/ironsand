@@ -973,6 +973,12 @@ unsafe extern "C" {
         T: &'a Type,
         AddressSpace: c_uint,
     ) -> &'a Value;
+    // `LLVMAddGlobalDCEPass` was removed from the LLVM C API in LLVM 17.
+    // LLVM 7 (default features) still ships the symbol; LLVM 19, 20, and 22
+    // do not. The LLVM 19/20/22 path routes through the name-registry shim
+    // `LLVMRustFindAndCreatePass(c"globaldce", 9)` and `LLVMRustAddPass`
+    // (see `dce_pass` in `src/nvvm.rs`).
+    #[cfg(not(any(feature = "llvm19", feature = "llvm20", feature = "llvm22")))]
     pub(crate) fn LLVMAddGlobalDCEPass(PM: &mut PassManager);
     pub(crate) fn LLVMGetNamedMetadataOperands(M: &Module, name: *const c_char, Dest: *mut &Value);
     pub(crate) fn LLVMGetNamedMetadataNumOperands(M: &Module, name: *const c_char) -> c_uint;
@@ -1582,7 +1588,17 @@ unsafe extern "C" {
         ConstantIndices: *const &'a Value,
         NumIndices: c_uint,
     ) -> &'a Value;
+    // `LLVMConstZExt` was removed from the LLVM C API in LLVM 17; LLVM 7
+    // still ships the untyped form, so declare it for the LLVM 7 default-
+    // features path only. LLVM 19+ (including 20/22) gets the Rust-side shim
+    // `LLVMRustConstZExt` declared below.
+    #[cfg(not(any(feature = "llvm19", feature = "llvm20", feature = "llvm22")))]
     pub(crate) fn LLVMConstZExt<'a>(ConstantVal: &'a Value, ToType: &'a Type) -> &'a Value;
+    #[cfg(any(feature = "llvm20", feature = "llvm22"))]
+    pub(crate) fn LLVMRustConstZExt<'a>(
+        ConstantVal: &'a Value,
+        ToType: &'a Type,
+    ) -> &'a Value;
     pub(crate) fn LLVMConstPtrToInt<'a>(ConstantVal: &'a Value, ToType: &'a Type) -> &'a Value;
     pub(crate) fn LLVMConstIntToPtr<'a>(ConstantVal: &'a Value, ToType: &'a Type) -> &'a Value;
     pub(crate) fn LLVMConstBitCast<'a>(ConstantVal: &'a Value, ToType: &'a Type) -> &'a Value;
@@ -1894,13 +1910,16 @@ unsafe extern "C" {
         Val: &'a Value,
         Name: *const c_char,
     ) -> &'a Value;
-    #[cfg(feature = "llvm19")]
     pub(crate) fn LLVMBuildLoad2<'a>(
         B: &Builder<'a>,
         Ty: &'a Type,
         PointerVal: &'a Value,
         Name: *const c_char,
     ) -> &'a Value;
+    // Untyped `LLVMBuildLoad` was removed in LLVM 17; LLVM 7 still ships the
+    // symbol. LLVM 19+ (incl. 20/22) routes everything through `LLVMBuildLoad2`
+    // (see cfg-dispatched call sites in `src/builder.rs`).
+    #[cfg(not(any(feature = "llvm19", feature = "llvm20", feature = "llvm22")))]
     pub(crate) fn LLVMBuildLoad<'a>(
         B: &Builder<'a>,
         PointerVal: &'a Value,

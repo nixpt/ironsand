@@ -362,11 +362,27 @@ unsafe fn dce_pass(module: &Module) {
         return;
     }
 
-    #[cfg(not(feature = "llvm19"))]
+    #[cfg(not(any(feature = "llvm19", feature = "llvm20", feature = "llvm22")))]
     unsafe {
         let pass_manager = LLVMCreatePassManager();
 
         LLVMAddGlobalDCEPass(pass_manager);
+
+        LLVMRunPassManager(pass_manager, module);
+        LLVMDisposePassManager(pass_manager);
+    }
+
+    // LLVM 20/22: rehydrate the legacy-PM `globaldce` pass through the name
+    // registry (the `LLVMAddGlobalDCEPass` C entrypoint was removed in LLVM 17).
+    // Keep the literal in scope so a future typo can't drift from the length arg.
+    const _: usize = b"globaldce".len();
+    #[cfg(any(feature = "llvm20", feature = "llvm22"))]
+    unsafe {
+        let pass_manager = LLVMCreatePassManager();
+
+        let pass = LLVMRustFindAndCreatePass(c"globaldce".as_ptr().cast(), 9)
+            .expect("failed to look up 'globaldce' pass");
+        LLVMRustAddPass(pass_manager, pass);
 
         LLVMRunPassManager(pass_manager, module);
         LLVMDisposePassManager(pass_manager);

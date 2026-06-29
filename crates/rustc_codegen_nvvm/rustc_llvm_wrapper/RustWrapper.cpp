@@ -1643,8 +1643,13 @@ extern "C" LLVMTypeKind LLVMRustGetTypeKind(LLVMTypeRef Ty)
   case Type::VectorTyID:
     return LLVMVectorTypeKind;
 #endif
+  // `Type::X86_MMXTyID` was removed in LLVM 20+ along with the `X86_MMX` IR type.
+  // The corresponding Rust-side `LLVMX86_MMXTypeKind` is kept for compatibility
+  // with the typed Kernel API but is no longer reachable from this switch.
+#if LLVM_VERSION_MAJOR < 20
   case Type::X86_MMXTyID:
     return LLVMX86_MMXTypeKind;
+#endif
   case Type::TokenTyID:
     return LLVMTokenTypeKind;
   }
@@ -2263,3 +2268,13 @@ extern "C" LLVMValueRef LLVMBuildInBoundsGEP2(LLVMBuilderRef B, LLVMTypeRef Ty,
 }
 
 #endif
+
+// `LLVMConstZExt` was removed in LLVM 17. LLVM 7 keeps it; LLVM 19 folds
+// ZExt via `LLVMConstInt` on the Rust side; LLVM 20/22 route through this
+// shim using `ConstantExpr::getCast(ZExt, …)` (`getZExt` isn't public).
+extern "C" LLVMValueRef LLVMRustConstZExt(LLVMValueRef ConstantVal,
+                                          LLVMTypeRef ToType) {
+  return wrap(ConstantExpr::getCast(Instruction::ZExt,
+                                     unwrap<Constant>(ConstantVal),
+                                     unwrap(ToType)));
+}
