@@ -17,6 +17,13 @@ use tracing::debug;
 // see libintrinsics.ll on what this is.
 const LIBINTRINSICS: &[u8] = include_bytes!(env!("NVVM_LIBINTRINSICS_BC_PATH"));
 
+// Legacy-PM `globaldce` pass name we look up via `LLVMRustFindAndCreatePass`
+// on the llvm20/22 path. Stored as a byte slice (NOT a c-string) because
+// the C++ side reads `StringRef(PassName, PassNameLen)` (see
+// `rustc_llvm_wrapper/PassWrapper.cpp::LLVMRustFindAndCreatePass`) — both
+// the pointer and length of that call derive from this declaration.
+const GLOBAL_DCE_PASS_NAME: &[u8] = b"globaldce";
+
 pub enum CodegenErr {
     Nvvm(NvvmError),
     Io(std::io::Error),
@@ -372,18 +379,19 @@ unsafe fn dce_pass(module: &Module) {
         LLVMDisposePassManager(pass_manager);
     }
 
-    // LLVM 20/22: rehydrate the legacy-PM `globaldce` pass through the name
-    // registry (the `LLVMAddGlobalDCEPass` C entrypoint was removed in LLVM 17).
-    // Tie the byte-string length to the explicit `9` arg below so a typo in
-    // either side fails at compile time rather than silently mis-pointing the
-    // pass lookup.
-    static_assertions::const_assert_eq!(b"globaldce".len(), 9);
+    // LLVM 20/22 path; rehydrate the legacy-PM `globaldce` pass via LLVM's
+    // name registry (`LLVMAddGlobalDCEPass` C entrypoint removed in LLVM 17).
+    // See `GLOBAL_DCE_PASS_NAME` for the byte-slice/c-string rationale.
+    static_assertions::const_assert_eq!(GLOBAL_DCE_PASS_NAME.len(), 9);
     #[cfg(any(feature = "llvm20", feature = "llvm22"))]
     unsafe {
         let pass_manager = LLVMCreatePassManager();
 
-        let pass = LLVMRustFindAndCreatePass(c"globaldce".as_ptr().cast(), 9)
-            .expect("failed to look up 'globaldce' pass");
+        let pass = LLVMRustFindAndCreatePass(
+            GLOBAL_DCE_PASS_NAME.as_ptr().cast(),
+            GLOBAL_DCE_PASS_NAME.len(),
+        )
+        .expect("failed to look up 'globaldce' pass");
         LLVMRustAddPass(pass_manager, pass);
 
         LLVMRunPassManager(pass_manager, module);
