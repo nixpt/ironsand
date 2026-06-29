@@ -5,7 +5,7 @@ use std::str;
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use libc::c_int;
+use libc::{c_char, c_int};
 use rustc_middle::bug;
 use rustc_session::Session;
 use rustc_target::spec::MergeFunctions;
@@ -134,4 +134,57 @@ unsafe fn configure_llvm(sess: &Session) {
 
         llvm::LLVMRustSetLLVMOptions(llvm_args.len() as c_int, llvm_args.as_ptr());
     }
+}
+
+// --------------------------------------------------------------------------
+// FFI bridge: LLVMRustStringWriteImpl
+//
+// Mirrors upstream `rustc_llvm/src/lib.rs`. The C-side declaration lives at
+// `rustc_llvm_wrapper/LLVMWrapper.h:27` and is *consumed* by
+// `RawRustStringOstream::write_impl` (LLVMWrapper.h:36). Without this Rust-side
+// body the cdylib exposes the symbol as undefined, so rustc's
+// `-Zcodegen-backend` dlopen fails under LLVM 20+ (host-rustc ABI shadow
+// had masked this under LLVM 19). See
+// `.dejavue/references/llvm20-runtime-shim-recipe.md` Step 4.
+// --------------------------------------------------------------------------
+
+/// `#[repr(C)]` shell around a `String` — same shape as upstream's
+/// `rustc_llvm::RustString`. The C-side sees `*mut OpaqueRustString`
+/// aliased as `RustStringRef`, but the layout is owned and accessed
+/// exclusively by Rust.
+#[repr(C)]
+pub struct RustString {
+    pub(crate) string: String,
+}
+
+impl RustString {
+    pub fn as_string_mut(&mut self) -> &mut String {
+        &mut self.string
+    }
+}
+
+/// Append `[slice_ptr .. slice_ptr + slice_len]` to the `String` behind `buf`.
+///
+/// Called from `RawRustStringOstream::write_impl` (LLVMWrapper.h:36) on every
+/// LLVM diagnostic-printing chunk. C declaration:
+/// ```c
+/// extern "C" void LLVMRustStringWriteImpl(
+///     RustStringRef buf, const char *slice_ptr, size_t slice_len);
+/// ```
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LLVMRustStringWriteImpl(
+    buf: *mut RustString,
+    slice_ptr: *const c_char,
+    slice_len: usize,
+) {
+    if buf.is_null() || slice_len == 0 {
+        return;
+    }
+    let dst = unsafe { (*buf).as_string_mut() };
+    let slice = unsafe { std::slice::from_raw_parts(slice_ptr as *const u8, slice_len) };
+    // SAFETY: LLVM IR text is always valid UTF-8 by spec. The C-side sends
+    // diagnostic-stream bytes that originate from LLVM's `raw_ostream::write_impl`,
+    // which only ever passes well-formed UTF-8.
+    let s = unsafe { std::str::from_utf8_unchecked(slice) };
+    dst.push_str(s);
 }

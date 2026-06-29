@@ -16,7 +16,7 @@ use rustc_data_structures::profiling::SelfProfilerRef;
 use rustc_errors::{DiagCtxt, DiagCtxtHandle, FatalError};
 use rustc_fs_util::path_to_c_string;
 use rustc_middle::bug;
-use rustc_middle::mono::{MonoItem, MonoItemData};
+use rustc_middle::mir::mono::{MonoItem, MonoItemData};
 use rustc_middle::{dep_graph, ty::TyCtxt};
 use rustc_session::Session;
 use rustc_session::config::{self, DebugInfo, OutputType};
@@ -184,7 +184,8 @@ pub(crate) unsafe fn codegen(
 
     let out = cgcx.output_filenames.temp_path_for_cgu(
         OutputType::Object,
-        module_name);
+        module_name,
+        None);
 
     // nvvm ir *is* llvm ir so emit_ir fits the expectation of llvm ir which is why we
     // implement this. this is copy and pasted straight from rustc_codegen_llvm
@@ -194,7 +195,8 @@ pub(crate) unsafe fn codegen(
             prof.generic_activity_with_arg("NVVM_module_codegen_emit_ir", &module.name[..]);
         let out = cgcx.output_filenames.temp_path_for_cgu(
             OutputType::LlvmAssembly,
-            module_name);
+            module_name,
+            None);
         let out = out.to_str().unwrap();
 
         let result = unsafe {
@@ -233,7 +235,10 @@ pub(crate) unsafe fn codegen(
         name: mod_name,
         kind: module.kind,
         object: Some(out),
-        global_asm_object: None,
+        // `global_asm_object` removed upstream: rustc nightly's `CompiledModule`
+        // no longer carries this field; global-asm splicing moved to LLVM's
+        // module-level inline-asm mechanism (see `AsmCodegenMethods::codegen_global_asm`
+        // -> `LLVMRustAppendModuleInlineAsm` in `src/asm.rs`).
         dwarf_object: None,
         bytecode: None,
         assembly: None,
@@ -250,10 +255,15 @@ pub(crate) unsafe fn codegen(
 /// in a single step)
 pub fn compile_codegen_unit(tcx: TyCtxt<'_>, cgu_name: Symbol) -> (ModuleCodegen<LlvmMod>, u64) {
     let dep_node = tcx.codegen_unit(cgu_name).codegen_dep_node(tcx);
+    // Upstream `DepGraph::with_task` 5-arg signature (nightly):
+    //   with_task(dep_node, tcx, task_arg: A: Debug, task_fn: fn(tc, A) -> R, hash_result: Option<fn(...) -> Fingerprint>)
+    // Passing `cgu_name` as the (Debug) task_arg and `module_codegen` (a nested
+    // `fn`, capturless -> fn pointer coercible) as the task_fn.
     let (module, _) = tcx.dep_graph.with_task(
         dep_node,
         tcx,
-        || module_codegen(tcx, cgu_name),
+        cgu_name,
+        module_codegen,
         None,
     );
 
