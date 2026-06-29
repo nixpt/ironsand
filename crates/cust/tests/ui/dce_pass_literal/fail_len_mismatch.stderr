@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: assertion failed: PASS_NAME.len() == 9
+  --> tests/ui/dce_pass_literal/fail_len_mismatch.rs:31:19
+   |
+31 |     const _: () = assert!(PASS_NAME.len() == 9);
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `dce_pass::_` failed here
