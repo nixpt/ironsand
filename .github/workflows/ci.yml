@@ -120,6 +120,65 @@ jobs:
         run: cargo test -p cust --doc --no-run
 
   # ------------------------------------------------------------------
+  # Trybuild pinning — RUNS the two trybuild harnesses in
+  # `crates/cust/tests/` (`dce_pass_literal_contract` +
+  # `kernel_descriptor_derive`) so a `.stderr` drift between rustup
+  # bumps fails CI rather than landing silently between PRs.
+  #
+  # The `.stderr` files are coupled to the rustup-pinned nightly
+  # recorded in `rust-toolchain.toml`. On bump, re-bless via:
+  #   TRYBUILD=overwrite cargo test -p cust --test dce_pass_literal_contract
+  #   TRYBUILD=overwrite cargo test -p cust --test kernel_descriptor_derive
+  # (per the toolchain-pin breadcrumb in
+  # `crates/cust/tests/dce_pass_literal_contract.rs`).
+  #
+  # This job does NOT set `TRYBUILD=overwrite` — the env var would
+  # silently re-bless `fail_*.stderr` on any drift, defeating the gate.
+  # ------------------------------------------------------------------
+  test-cust-trybuild:
+    runs-on: ubuntu-latest
+    needs: [fmt]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-04-02
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install CUDA toolkit (for cust linking)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nvidia-cuda-toolkit
+
+      - name: Find CUDA stubs and set RUSTFLAGS
+        run: |
+          for d in /usr/lib/x86_64-linux-gnu/stubs \
+                   /usr/local/cuda/lib64/stubs   \
+                   /usr/lib/x86_64-linux-gnu; do
+            if [ -f "$d/libcuda.so" ] || [ -f "$d/libcuda.so.1" ]; then
+              echo "CUDA_STUBS=$d" >> "$GITHUB_ENV"
+              echo "Found CUDA stubs at $d"
+              break
+            fi
+          done
+          if [ -z "${CUDA_STUBS:-}" ]; then
+            echo "No CUDA stubs found; linking may fail."
+          fi
+
+      - name: "Trybuild pin: dce_pass_literal_contract"
+        env:
+          RUSTFLAGS: "-L ${{ env.CUDA_STUBS }}"
+        run: cargo test -p cust --test dce_pass_literal_contract
+
+      - name: "Trybuild pin: kernel_descriptor_derive"
+        env:
+          RUSTFLAGS: "-L ${{ env.CUDA_STUBS }}"
+        run: cargo test -p cust --test kernel_descriptor_derive
+
+  # ------------------------------------------------------------------
   # Build the mdBook guide.
   # ------------------------------------------------------------------
   guide:
