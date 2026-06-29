@@ -1,5 +1,7 @@
-error[E0080]: evaluation panicked: assertion failed: PASS_NAME.len() == 9
-  --> tests/ui/dce_pass_literal/fail_len_mismatch.rs:31:19
+error[E0080]: attempt to compute `0_usize - 1_usize`, which would overflow
+  --> tests/ui/dce_pass_literal/fail_len_mismatch.rs:30:5
    |
-31 |     const _: () = assert!(PASS_NAME.len() == 9);
-   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `dce_pass::_` failed here
+30 |     static_assertions::const_assert_eq!(PASS_NAME.len(), 9);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `dce_pass::_::{constant#0}` failed here
+   |
+   = note: this error originates in the macro `const_assert` which comes from the expansion of the macro `static_assertions::const_assert_eq` (in Nightly builds, run with -Z macro-backtrace for more info)

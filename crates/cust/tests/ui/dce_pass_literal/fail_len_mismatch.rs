@@ -12,10 +12,9 @@
 //! - Without this assertion, a typo of this form would silently reach
 //!   `LLVMRustFindAndCreatePass` and return a NULL pass handle at runtime.
 //!
-//! Mirrors the actual `unsafe fn dce_pass` body shape. Uses the bare
-//! std-lib `const _: () = assert!(LHS == RHS);` form — which is exactly
-//! what `static_assertions::const_assert_eq!` expands to — so this
-//! synthetic has no new dep on the `static_assertions` crate.
+//! Mirrors the actual `unsafe fn dce_pass` body shape. Uses the SAME
+//! `static_assertions::const_assert_eq!` macro as the production site so
+//! the auto-blessed `.stderr` mirrors the actual diagnostic verbatim.
 
 /// Module-level pass name (mirrors `GLOBAL_DCE_PASS_NAME` from
 /// `crates/rustc_codegen_nvvm/src/nvvm.rs::dce_pass`).
@@ -28,7 +27,7 @@ unsafe fn dce_pass() {
     // Length-mismatch typo: const_assert_eq fires at compile time on
     // the length assertion `8 == 9`. This is exactly the protection the
     // actual production `const_assert_eq` provides.
-    const _: () = assert!(PASS_NAME.len() == 9);
+    static_assertions::const_assert_eq!(PASS_NAME.len(), 9);
 }
 
 fn main() {}

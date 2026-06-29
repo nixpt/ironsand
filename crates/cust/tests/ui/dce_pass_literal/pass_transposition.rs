@@ -13,10 +13,9 @@
 //!   `AsCCharPtr` (see `crates/rustc_codegen_nvvm/src/common.rs`'s
 //!   `# Invariant` block; audit commit `c15187b`).
 //!
-//! Mirrors the actual `unsafe fn dce_pass` body shape. Uses the bare
-//! std-lib `const _: () = assert!(LHS == RHS);` form — which is exactly
-//! what `static_assertions::const_assert_eq!` expands to — so this
-//! synthetic has no new dep on the `static_assertions` crate.
+//! Mirrors the actual `unsafe fn dce_pass` body shape. Uses the SAME
+//! `static_assertions::const_assert_eq!` macro as the production site so
+//! the auto-blessed `.stderr` mirrors the actual diagnostic verbatim.
 
 /// Module-level pass name (mirrors `GLOBAL_DCE_PASS_NAME` from
 /// `crates/rustc_codegen_nvvm/src/nvvm.rs::dce_pass`).
@@ -28,7 +27,7 @@ const PASS_NAME: &[u8] = b"gloabldce";
 unsafe fn dce_pass() {
     // Same-length transposition: const_assert_eq does not fire on
     // a matching length. This is the documented limitation.
-    const _: () = assert!(PASS_NAME.len() == 9);
+    static_assertions::const_assert_eq!(PASS_NAME.len(), 9);
 }
 
 fn main() {}

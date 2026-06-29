@@ -11,12 +11,16 @@
 //!   on the runtime `&str` path (`crates/rustc_codegen_nvvm/src/common.rs`,
 //!   `crates/rustc_codegen_nvvm/src/back.rs`).
 //!
-//! These tests pin the **compile-time** leg of that pair. They reproduce
-//! `static_assertions::const_assert_eq!`'s expansion as the bare std-lib
-//! `const _: () = assert!(LHS == RHS);` form so the synthetic sources
-//! have no new dependency beyond stable Rust. (That std-lib form is exactly
-//! what `static_assertions::const_assert_eq!` expands to; only the
-//! human-friendly `concat!()` panic message differs.)
+//! These tests pin the **compile-time** leg of that pair. The synthetic
+//! sources under `tests/ui/dce_pass_literal/` use the SAME
+//! `static_assertions::const_assert_eq!` macro as the production site so
+//! the auto-blessed `.stderr` mirrors the actual diagnostic verbatim.
+//! (`static_assertions = "1.1"` is added to `[dev-dependencies]` in
+//! `crates/cust/Cargo.toml` for this purpose.)
+//!
+//! Toolchain pin: `.stderr` is coupled to `rust-toolchain.toml`. Re-bless
+//! via `TRYBUILD=overwrite cargo test -p cust --test
+//! dce_pass_literal_contract` after any rustup bump, before CI green.
 //!
 //! Coverage:
 //! - Positive (`pass_*.rs`): same-length transpositions are INTENTIONALLY
