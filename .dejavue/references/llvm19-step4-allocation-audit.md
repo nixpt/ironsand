@@ -2,6 +2,12 @@
 type: audit
 dcp: DCP/1.0
 status: closed-with-open-precondition
+renamed-from: llvm20-step4-allocation-audit.md
+phase-3d-update: |-
+  2026-06-29 — the audit target (`LLVMRustStringWriteImpl` FFI body + `RustString` struct in `crates/rustc_codegen_nvvm/src/init.rs` lines 140-185) is still current and exercising under the LLVM 19 path.
+  The Phase-3d plumbing collapse did NOT touch `init.rs`.
+  The unresolved ABI-alignment precondition (Section D, "audit the host-rustc-pinned rlib for the canonical `RustString` layout") remains open and is the only outstanding follow-up from this audit.
+  Cross-link update: the in-body Cross-references entry that previously pointed at `.dejavue/references/llvm20-runtime-shim-recipe.md` was patched to point at `.dejavue/references/llvm19-runtime-shim-recipe.md` (the post-Phase-3d rename target).
 ---
 
 # LLVM 20 Step 4 — `OpaqueRustString` Allocation-Site Audit
@@ -116,7 +122,9 @@ defensive-but-not-e2e-confirmed.
 
 ## Cross-references
 
-- `.dejavue/references/llvm20-runtime-shim-recipe.md` — Step 4 of the recipe.
+- `.dejavue/references/llvm19-runtime-shim-recipe.md` (renamed
+  post-Phase-3d from `.dejavue/references/llvm20-runtime-shim-recipe.md`)
+  — Step 4 of the recipe.
 - `.dejavue/decisions.md` entry "[CORRECTION] 2026-06-28T22:00:00" — supersedes
   previous 3-5 day estimate with 1-day / ~35 LoC budget for the full shim.
 - `crates/rustc_codegen_nvvm/src/init.rs` lines 140-185 — the actual body.

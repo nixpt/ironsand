@@ -145,7 +145,8 @@ unsafe fn configure_llvm(sess: &Session) {
 // body the cdylib exposes the symbol as undefined, so rustc's
 // `-Zcodegen-backend` dlopen fails under LLVM 20+ (host-rustc ABI shadow
 // had masked this under LLVM 19). See
-// `.dejavue/references/llvm20-runtime-shim-recipe.md` Step 4.
+// `.dejavue/references/llvm19-runtime-shim-recipe.md` Step 4
+// (renamed from `llvm20-runtime-shim-recipe.md` in commit 79899f8).
 // --------------------------------------------------------------------------
 
 /// `#[repr(C)]` shell around a `String` — same shape as upstream's

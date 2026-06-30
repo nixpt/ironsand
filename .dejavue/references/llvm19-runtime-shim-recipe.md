@@ -2,6 +2,11 @@
 type: howto
 dcp: DCP/1.0
 status: completed-migration  (Steps 1-3 of 4 landed; Step 4 separate track — see Open followups)
+renamed-from: llvm20-runtime-shim-recipe.md
+phase-3d-update: |-
+  2026-06-29 — Steps 1-3 cfg-gates were REVERSED in commit 79899f8 (`phase-3d: drop llvm20 + llvm22 plumbing`). The 5x `cfg(not(any(feature=llvm19, llvm20, llvm22)))` legacy arms collapsed to `cfg(not(feature=llvm19))`; the 3x `cfg(any(feature=llvm20, llvm22))` post-LLVM-17 shim arms (incl. `LLVMRustFindAndCreatePass` rehydration in `dce_pass`, the `LLVMBuildLoad2` typed-load bridge, and `LLVMRustConstZExt`) were DELETED.
+  Only Step 4 (the `LLVMRustStringWriteImpl` FFI body at `src/init.rs:140-185`) remains current, since the `RustString` struct + unsafe-extern body are still required to keep the cdylib dlopen-clean under `cargo -Zcodegen-backend` even on the llvm19 path.
+  Cross-link update: the in-body Cross-links entry that previously pointed at `.dejavue/references/llvm22-build-recipe.md` was patched to point at `.dejavue/references/llvm19-llvm22-migration-recipe-archived.md` (the post-Phase-3d rename target).
 ---
 
 # LLVM 20 Runtime-Shim Recipe — Landed Implementation
@@ -164,9 +169,12 @@ actually take effect at e2e time.
   shim: `LLVMRustStringWriteImpl` is our missing body, not a
   host-rustc ABI expectation. Scope downgrades from 3-5 days to
   ~1 day". Step 4 lives here.
-- **`.dejavue/references/llvm22-build-recipe.md`** — LLVM 22 source-
-  compile recipe (Steps 1-6 of which must be done to land LLVM 22
-  end-to-end). Independent of this runtime-shim recipe.
+- **`.dejavue/references/llvm19-llvm22-migration-recipe-archived.md`**
+  (renamed post-Phase-3d from `.dejavue/references/llvm22-build-recipe.md`)
+  — LLVM 22 source-compile recipe (Steps 1-6 of which must be done to land
+  LLVM 22 end-to-end). Independent of this runtime-shim recipe; preserved
+  for historical context now that the LLVM 22 cargo feature was dropped in
+  commit 79899f8.
 
 ## Gotchas carried over
 
@@ -199,7 +207,11 @@ actually take effect at e2e time.
 4. Step 4 (`LLVMRustStringWriteImpl`) closure on the separate track
    per `.dejavue/decisions.md` 2026-06-28T22:00 [CORRECTION] entry.
 5. **(Stretch)** Same-success under `--features llvm22` — once the
-   LLVM 22 source-side steps (`.dejavue/references/llvm22-build-recipe.
-   md` Steps 1-6) are done, the cfg gates landed here auto-apply on the
-   llvm22 path because every gate's exclusion clause covers all three
-   non-7 toolchains. Verified by inspection; not yet verified by build.
+   LLVM 22 source-side steps (`.dejavue/references/llvm19-llvm22-migration-recipe-archived.md`
+   Steps 1-6; pre-Phase-3d path was `.dejavue/references/llvm22-build-recipe.md`)
+   are done, the cfg gates landed here auto-apply on the llvm22 path
+   because every gate's exclusion clause covers all three non-7
+   toolchains. Verified by inspection; not yet verified by build.
+   **Note:** as of commit 79899f8 (Phase-3d) the llvm22 cargo feature
+   was dropped, so this Stretch criterion is purely aspirational and
+   depends on a future re-introduction of the llvm22 plumbing.

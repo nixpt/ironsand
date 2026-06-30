@@ -1,7 +1,13 @@
 ---
 type: howto
 dcp: DCP/1.0
-status: planned-migration  (not yet completed end-to-end)
+status: ARCHIVED  (planned-migration abandoned — see Phase-3d update)
+renamed-from: llvm22-build-recipe.md
+phase-3d-update: |-
+  2026-06-29 — the LLVM 22 cargo feature was DROPPED in commit 79899f8 (`phase-3d: drop llvm20 + llvm22 plumbing`). The cargo-feature plumbing layer was removed (the `cuda_builder::compile_error!` mutual-exclusion guard, the `llvm22` forward-compat cfg!(feature=...) hook, the `--features llvm22` branch cascade, and the `LLVMConfig_22` env-var plumbing are all gone).
+  Note: the cmake-built `/workspace/scratch/llvm22/` install tree (referenced in the Toolchain section below) was NOT removed by Phase-3d; only its cargo-feature consumer was retired. The artifact remains on disk in case anyone revisits the LLVM 22 migration in a future session.
+  This document is preserved as historical context for the planned API-drift catalogue + LoC estimate + post-migration opaque-pointer shim work.
+  **Do not act on Steps 1-7 against the current codebase** — the inventory of source files + line numbers in this document was last audited against `crates/rustc_codegen_nvvm/` pre-Phase-3d; post-cascade, several cfg gates and FFI decls referenced here no longer exist.
 ---
 
 # LLVM 22 Migration Recipe
