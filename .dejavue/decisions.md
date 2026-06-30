@@ -298,3 +298,77 @@ Notes:
 
 
 
+
+## 2026-06-30T16:00:00-05:00 — [STRATEGIC] Phase-3b Tier-3-r3: residual #1 (IntrinsicResult) ELIMINATED, 7 → 6 nightly-drift residuals
+
+**Reason:** Capture and commit the Phase-3b Tier-3-r3 session outcomes to the repo-local agent-memory ledger so the next context reset resumes with full baseline + lessons instead of starting from scratch. The driving goal was to drive 7 nightly-2026-04-02 cargo-check residuals on `ironand/crates/rustc_codegen_nvvm/` to 0 in a single atomic commit; this turn resolved 1 of 7 (residual #1) and captured the discovery + lesson that made resolution tractable.
+
+**The 7 baseline residuals (verbatim cargo errors at commit `588204e`):**
+
+1. **E0432 + E0603** — `crates/rustc_codegen_nvvm/src/intrinsic.rs:5:5` — `unresolved import rustc_codegen_ssa::mir::intrinsic::IntrinsicResult`. The `mir::intrinsic` module is private; the `IntrinsicResult` enum was REMOVED upstream in nightly-2026-04-02.
+2. **E0432** — `crates/rustc_codegen_nvvm/src/lib.rs:63:72` — `unresolved import rustc_codegen_ssa::back::write::ThinLtoInput` (round-2 had moved this to `traits::ThinLtoInput` which also failed). Trait-method re-export chain needs verification against actual toolchain rust-src.
+3. **E0407** — `crates/rustc_codegen_nvvm/src/debug_info/metadata/type_map.rs:35:9` — `method 'stable_hash' is not a member of trait 'super::StableHash'`. Upstream method name is `hash_stable` (NOT `stable_hash`).
+4. **E0405** — `crates/rustc_codegen_nvvm/src/debug_info/metadata/type_map.rs:35:67` — `cannot find type 'StableHashCtxt' in rustc_data_structures::stable_hasher`. Trait expects `StableHashingContext` (qualified context bound, NOT a free type).
+5. **E0046** — `crates/rustc_codegen_nvvm/src/builder.rs:182:1` — `Not all trait items implemented for BuilderMethods, missing 'scalable_alloca'`. Trait requires this method; signature to be re-derived from actual upstream.
+6. **E0107** — `crates/rustc_codegen_nvvm/src/debug_info/metadata/type_map.rs:34:17` — `missing generics for trait HashStable (expected 1, got 0)`. Upstream `pub trait HashStable<HCX: StableHashingContext>` (or just `<HCX: ?Sized>`).
+7. **E0053** — `crates/rustc_codegen_nvvm/src/lib.rs:195:10` — `Method join_codegen has incompatible type for trait (expected IndexMap, found UnordMap)`. `WorkProductMap` upstream is `UnordMap` per `rustc_middle::dep_graph::graph.rs`, but the trait expects `IndexMap` — bridge via `into_iter().collect::<FxIndexMap<_,_>>()` of the right shape.
+
+**Round-3 batch regression lesson (the asset-cost of batch-str_replace):**
+
+The previous session attempted to drive all 7 → 0 in ONE BATCH of 5 str_replaces (signature/imports edits across `intrinsic.rs`, `lib.rs`, `type_map.rs`, `builder.rs`). Cargo check after the batch produced 14 errors — 7 new errors introduced by the batch REPLACED the 7 baseline errors. Specifically:
+- `E0252` multiple definitions of `WorkProduct` (added redundant `use rustc_middle::dep_graph::{WorkProduct, WorkProductId}` line colliding with the existing import).
+- `E0046` + `E0050` `scalable_alloca` (signature guess `(&mut self, _ty: &'ll Type, _align: Align)` was wrong shape — actual trait expects different arity).
+- `E0277` Sized bound missing on `HCX` for `HashStable` (used `?Sized` when trait requires `Sized`).
+- `E0308` reversed direction on join_codegen bridge (tried `UnordMap → IndexMap` conversion when the trait wanted `UnordMap`, not `IndexMap`).
+- E0599 stable_hash method name missing on call site (changed trait impl method name to `hash_stable` without updating callsite `tcx.with_stable_hashing_context(...)` which still calls `self.stable_hash(hcx, &mut hasher)`).
+
+**Root-cause discovery (the key unlock for residual #1):**
+
+The previous sessions were reading from `/workspace/scratch/rust-src-nightly/` — a STALE SNAPSHOT that diverged from the actual build toolchain. The ACTUAL nightly-2026-04-02 rust-src lives at:
+
+```
+/workspace/scratch/rustup/toolchains/nightly-2026-04-02-x86_64-unknown-linux-gnu/lib/rustlib/rustc-src/rust/
+```
+
+(subdirectory `compiler/rustc_codegen_ssa/...`, etc.). Differences observed between the stale snapshot and the real toolchain include `IntrinsicResult` being entirely absent, `ThinLtoInput` re-export structure differing, and the `HashStable` trait signature using `StableHashingContext` instead of an unqualified context.
+
+This explains why every prior round of cargo hints vs upstream-source research was internally inconsistent.
+
+**Residual #1 migration sequence (1A-1E) — how the disciplined one-edit-at-a-time close worked:**
+
+1. **1A** (signature + imports) — Replaced `use rustc_codegen_ssa::mir::intrinsic::IntrinsicResult;` with removal AND replaced `fn codegen_intrinsic_call(...) -> IntrinsicResult<'tcx, &'ll Value>` with the actual upstream signature:
+   ```rust
+   fn codegen_intrinsic_call(
+       &mut self,
+       instance: ty::Instance<'tcx>,
+       args: &[OperandRef<'tcx, &'ll Value>],
+       result: PlaceRef<'tcx, &'ll Value>,
+       span: Span,
+   ) -> Result<(), ty::Instance<'tcx>>;
+   ```
+   cargo: introduced E0425/E0433 for `result_place`/`result_layout` references inside the body.
+2. **1B** (body prologue removal) — Removed the derived-span line and the temp-alloca-creation block `let (result, used_temp_alloca) = if let Some(place_val) = result_place { ... } else { PlaceRef::alloca(...) }`. Caller now provides `result: PlaceRef<...>` directly; `span` is now a parameter; `used_temp_alloca` is no longer declared.
+3. **1C** (return-path substitutions) — Bulk-substituted all `IntrinsicResult::WroteIntoPlace` → `Ok(())`, `IntrinsicResult::Operand(self.load_operand(result).val)` → `Ok(())`, and the single `IntrinsicResult::Fallback(Instance::new_raw(...))` → `Err(Instance::new_raw(...))` (the fallback arm signals the runtime to dispatch the default body via `super::codegen_intrinsic_call`).
+4. **1D** (collapse conditional tails at 16- and 8-space indent) — `if used_temp_alloca { Ok(()) } else { Ok(()) }` → `Ok(())` (3 sites at 16-space indent, 1 site at 8-space indent for function-end fallthrough). Used `allowMultiple=true` on the 16-space pattern.
+5. **1E** (catch the missed 24-space-indent site) — `return if used_temp_alloca { Ok(()) } else { Ok(()) };` (24-space indent, inside select_unpredictable inner match arm) needed a SEPARATE single-occurrence substitution because Step 1D's 16-space pattern didn't match this depth. Cargo E0425 for `cannot find value 'used_temp_alloca'` at line 429 was the signal.
+
+After 1E: cargo attributes 0 errors to `intrinsic.rs` territory. Residual #1 fully eliminated.
+
+**Rejected alternatives:**
+
+- **Batch-str_replace-against-baseline (round-3 approach)**: 5 edits in a single round with no cargo validation between each. Result: regressed 7 → 14 errors. REJECTED for future migration arcs because it can't surface a wrong-name or wrong-shape guess per-edit.
+- **Sourcing from `/workspace/scratch/rust-src-nightly/` (stale snapshot)**: Was a model of upstream source for many rounds. REJECTED — the snapshot diverged from the actual build toolchain, producing conflicting ground truth vs the cargo verifier.
+- **Spinning up a separate "evidence file" outside .dejavue/**: Considered naming `/tmp/ironsand_upstream_signatures.md` as a transient evidence file but rejected because (a) `.dejavue/` is the canonical repo-local memory, (b) the file is committed alongside the decision, (c) transient files risk being lost between sessions.
+
+**Tradeoffs:**
+
+- Strict one-edit-at-a-time discipline is SLOWER per edit (cargo check cycle per sub-step) but CONVERGES — every cargo error is a precise signal pointing to the next fix.
+- Manual reconciliation of round-3's speculative str_replaces back to the `a7212d3` baseline (full `git checkout HEAD -- intrinsic.rs lib.rs type_map.rs builder.rs`) is the canonical rollback path when batch attempts regress.
+- `/tmp/ironsand_upstream_signatures.md` is intentionally OUTSIDE the repo (transient debug artifact, not committed). Each session can regenerate from the actual nightly-2026-04-02 rust-src as needed.
+
+**Notes:**
+
+- The working tree currently still has the dirty `intrinsic.rs` from the residual-#1 migration (the post-1E closure). The user has accepted that residual #2-#7 will land in follow-up commits to keep each commit atomic.
+- Likely dead-code warnings (cargo `unreachable_patterns` lints) emerged on `select_unpredictable`'s inner match arms post-1E because the ref arms now always early-return; expected to be warnings, not errors.
+- The user's discipline is "ONE str_replace per residual with cargo-as-ground-truth validation between each edit". The 1A-1E decomposition was a single-residual sub-decomposition where each sub-step was a distinct category of edit within the same trait-method migration.
+- The system date is 2026-06-30 per session metadata.
