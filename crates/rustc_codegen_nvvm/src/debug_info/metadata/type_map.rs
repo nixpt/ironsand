@@ -26,16 +26,13 @@ mod private {
 
     // Phase-3b Tier-3f: upstream `rustc_macros::StableHash` derive macro was
     // removed; provide a manual `StableHash` trait impl so `UniqueTypeId`'s
-    // `#[derive(StableHash)]` (which transitively references `HiddenZst`)
-    // can still be derived. The trait is file-imported as
-    // `HashStable as StableHash` from `rustc_data_structures::stable_hasher`,
-    // and the convention both upstream derive and this manual impl share is a
-    // method named `stable_hash(&self, &mut HCX, &mut StableHasher)`.
-    impl<CTX> super::StableHash<CTX> for HiddenZst
-    where
-        CTX: rustc_data_structures::stable_hasher::StableHashingContext,
-    {
-        fn stable_hash(
+    // (now-defunct) `#[derive(StableHash)]` — which transitively references
+    // `HiddenZst` field markers — can still resolve. The trait is
+    // file-imported as `HashStable as StableHash` from
+    // `rustc_data_structures::stable_hasher`, and the method both upstream
+    // and this manual impl share is `hash_stable(&self, &mut HCX, &mut StableHasher)`.
+    impl<CTX> super::StableHash<CTX> for HiddenZst {
+        fn hash_stable(
             &self,
             _hcx: &mut CTX,
             _hasher: &mut rustc_data_structures::stable_hasher::StableHasher,
@@ -53,7 +50,7 @@ mod private {
 /// Note that there are some things that only show up in debuginfo, like
 /// the separate type descriptions for each enum variant. These get an ID
 /// too because they have their own debuginfo node in LLVM IR.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, StableHash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum UniqueTypeId<'tcx> {
     /// The ID of a regular type as it shows up at the language level.
     Ty(Ty<'tcx>, private::HiddenZst),
@@ -68,6 +65,45 @@ pub(super) enum UniqueTypeId<'tcx> {
         Option<ExistentialTraitRef<'tcx>>,
         private::HiddenZst,
     ),
+}
+
+// Phase-3b Tier-3-residual-trio: `rustc_macros::StableHash` derive was removed
+// upstream, so the enum's `#[derive(StableHash)]` (dropped above) is now a no-op.
+// Provide the manual impl here. We hash each variant's *meaningful* fields and
+// hardcode a per-variant tag byte so that `Ty(..)` and `VariantPart(..)` (which
+// carry identical `Ty<'tcx>` payloads) hash to different fingerprints. We
+// SPECIALIZE the impl's `Hcx` to `StableHashingContext<'_>` directly: in
+// nightly-2026-04-02 `StableHashingContext` is a struct (not a marker trait),
+// so a `where CTX: StableHashingContext` bound is structurally invalid. Every
+// upstream `HashStable` impl for inner rustc_middle types uses this concrete
+// type — ironand follows suit. Do NOT re-collapse to a generic CTX shape.
+impl<'tcx> StableHash<rustc_middle::ich::StableHashingContext<'_>> for UniqueTypeId<'tcx> {
+    fn hash_stable(
+        &self,
+        hcx: &mut rustc_middle::ich::StableHashingContext<'_>,
+        hasher: &mut StableHasher,
+    ) {
+        match *self {
+            UniqueTypeId::Ty(ty, _) => {
+                0u8.hash_stable(hcx, hasher);
+                ty.hash_stable(hcx, hasher);
+            }
+            UniqueTypeId::VariantPart(ty, _) => {
+                1u8.hash_stable(hcx, hasher);
+                ty.hash_stable(hcx, hasher);
+            }
+            UniqueTypeId::VariantStructType(ty, idx, _) => {
+                2u8.hash_stable(hcx, hasher);
+                ty.hash_stable(hcx, hasher);
+                idx.hash_stable(hcx, hasher);
+            }
+            UniqueTypeId::VTableTy(ty, trait_ref, _) => {
+                3u8.hash_stable(hcx, hasher);
+                ty.hash_stable(hcx, hasher);
+                trait_ref.hash_stable(hcx, hasher);
+            }
+        }
+    }
 }
 
 impl<'tcx> UniqueTypeId<'tcx> {
@@ -122,7 +158,7 @@ impl<'tcx> UniqueTypeId<'tcx> {
     pub fn generate_unique_id_string(self, tcx: TyCtxt<'tcx>) -> String {
         let mut hasher = StableHasher::new();
         tcx.with_stable_hashing_context(|mut hcx| {
-            hcx.while_hashing_spans(false, |hcx| self.stable_hash(hcx, &mut hasher))
+            hcx.while_hashing_spans(false, |hcx| self.hash_stable(hcx, &mut hasher))
         });
         hasher.finish::<Fingerprint>().to_hex()
     }

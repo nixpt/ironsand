@@ -817,7 +817,7 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
             }
             _ => unreachable!(),
         };
-        assert!(!fn_sig.c_variadic());
+        assert!(!fn_sig.c_variadic);
 
         let ret_layout = self.layout_of(fn_sig.output());
         let llreturn_ty = if ret_layout.is_zst() {

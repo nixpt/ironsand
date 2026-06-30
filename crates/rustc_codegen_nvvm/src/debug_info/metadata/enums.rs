@@ -869,13 +869,13 @@ fn compute_discriminant_value<'tcx>(
                     .largest_niche
                     .as_ref()
                     .unwrap()
-                    .valid_range();
+                    .valid_range;
 
                 // Upstream `valid_range` API is `() -> RangeInclusive<u128>`
                 // where `.start`/`.end` are PRIVATE fields; use the public
                 // accessor methods.
-                let lo = valid_range.start();
-                let hi = valid_range.end();
+                let lo = valid_range.start;
+                let hi = valid_range.end;
                 let min = lo.min(hi);
                 let min = tag.size(cx).truncate(min);
 
@@ -884,9 +884,8 @@ fn compute_discriminant_value<'tcx>(
 
                 DiscrResult::Range(min, max)
             } else {
-                let value = (variant_index.as_u32() as u128)
-                    .wrapping_sub(niche_variants.start.as_u32() as u128)
-                    .wrapping_add(niche_start);
+                let value = (variant_index.as_u32() as u128).wrapping_sub(niche_variants.start().as_u32() as u128)
+                .wrapping_add(niche_start);
                 let value = tag.size(cx).truncate(value);
                 DiscrResult::Value(value)
             }

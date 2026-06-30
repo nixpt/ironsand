@@ -484,9 +484,9 @@ impl<'ll, 'tcx, 'a> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
 
     fn scalable_alloca(
         &mut self,
-        _layout: rustc_middle::ty::layout::TyAndLayout<'tcx>,
-        _ty: &'ll Type,
+        _elt: u64,
         _align: rustc_abi::Align,
+        _element_ty: Ty<'_>,
     ) -> &'ll Value {
         // NVVM (LLVM 7 + PTX) does not support scalable vector allocations;
         // declare the trait satisfied with an undef value to fall through.
