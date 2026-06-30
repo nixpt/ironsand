@@ -17,3 +17,8 @@ rustc-ice-*.txt
 .dejavue/embedder_circuit.json
 .dejavue/timeline.jsonl.bak-*
 
+# Kernel build/run artifacts (noise from cargo run --release on examples/* kernels)
+*.log
+RC=*
+index.html
+
