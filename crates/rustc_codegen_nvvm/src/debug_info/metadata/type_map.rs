@@ -6,7 +6,7 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::stable_hasher::{HashStable as StableHash, StableHasher};
 use rustc_macros::HashStable as StableHash;
 use rustc_middle::bug;
-use rustc_middle::ty::{self, ExistentialTraitRef, Ty, TyCtxt, Unnormalized};
+use rustc_middle::ty::{self, ExistentialTraitRef, Ty, TyCtxt};
 
 use super::{DefinitionLocation, SmallVec, UNKNOWN_LINE_NUMBER, unknown_file_metadata};
 use crate::common::AsCCharPtr;
@@ -54,7 +54,7 @@ impl<'tcx> UniqueTypeId<'tcx> {
     pub fn for_ty(tcx: TyCtxt<'tcx>, t: Ty<'tcx>) -> Self {
         assert_eq!(
             t,
-            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), Unnormalized::new_wip(t))
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), t)
         );
         UniqueTypeId::Ty(t, private::HiddenZst)
     }
@@ -90,7 +90,7 @@ impl<'tcx> UniqueTypeId<'tcx> {
         );
         assert_eq!(
             implemented_trait,
-            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), Unnormalized::new_wip(implemented_trait))
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), implemented_trait)
         );
         UniqueTypeId::VTableTy(self_type, implemented_trait, private::HiddenZst)
     }

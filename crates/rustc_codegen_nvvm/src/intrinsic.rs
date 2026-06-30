@@ -943,12 +943,5 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
     }
 
 
-    fn retag_mem(&mut self, _val: Self::Value, _info: &rustc_codegen_ssa::RetagInfo<Self::Value>) {
-        // Not implementing retagging for GPU codegen
-    }
 
-    fn retag_reg(&mut self, val: Self::Value, _info: &rustc_codegen_ssa::RetagInfo<Self::Value>) -> Self::Value {
-        // Not implementing retagging for GPU codegen, just return the value
-        val
-    }
 }

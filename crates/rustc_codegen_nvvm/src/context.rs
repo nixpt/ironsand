@@ -255,9 +255,6 @@ impl<'ll, 'tcx> MiscCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
     ) {
     }
 
-    fn intrinsic_call_expects_place_always(&self, _name: Symbol) -> bool {
-        false
-    }
 }
 
 impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {

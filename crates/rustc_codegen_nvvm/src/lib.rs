@@ -341,8 +341,6 @@ impl WriteBackendMethods for NvvmCodegenBackend {
 }
 
 impl ExtraBackendMethods for NvvmCodegenBackend {
-    type Module = LlvmMod;
-
     fn codegen_allocator(
         &self,
         tcx: TyCtxt<'_>,

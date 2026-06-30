@@ -61,10 +61,6 @@ impl<'ll, 'tcx> ConstCodegenMethods for CodegenCx<'ll, 'tcx> {
         self.const_uint(self.type_i64(), i)
     }
 
-    fn const_i64(&self, i: i64) -> &'ll Value {
-        self.const_int(self.type_i64(), i)
-    }
-
     fn const_usize(&self, i: u64) -> &'ll Value {
         self.const_uint(self.isize_ty, i)
     }

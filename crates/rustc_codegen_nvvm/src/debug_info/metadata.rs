@@ -13,7 +13,7 @@ use rustc_hir::def::{CtorKind, DefKind};
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_middle::bug;
 use rustc_middle::ty::layout::{HasTypingEnv, LayoutOf, TyAndLayout};
-use rustc_middle::ty::{self, AdtKind, CoroutineArgsExt, Instance, Ty, TyCtxt, Unnormalized, Visibility};
+use rustc_middle::ty::{self, AdtKind, CoroutineArgsExt, Instance, Ty, TyCtxt, Visibility};
 use rustc_session::config::{self, DebugInfo};
 use rustc_span::symbol::Symbol;
 use rustc_span::{DUMMY_SP, FileName, RemapPathScopeComponents, SourceFile, hygiene};
@@ -963,7 +963,7 @@ fn build_upvar_field_di_nodes<'ll, 'tcx>(
     assert!(
         up_var_tys
             .iter()
-            .all(|t| t == cx.tcx.normalize_erasing_regions(cx.typing_env(), Unnormalized::new_wip(t)))
+            .all(|t| t == cx.tcx.normalize_erasing_regions(cx.typing_env(), t))
     );
 
     let capture_names = cx.tcx.closure_saved_names_of_captured_variables(def_id);
@@ -1154,7 +1154,7 @@ fn build_generic_type_param_di_nodes<'ll, 'tcx>(
         let template_params: SmallVec<_> = iter::zip(args, names)
             .filter_map(|(kind, name)| {
                 kind.as_type().map(|ty| {
-                    let actual_type = cx.tcx.normalize_erasing_regions(cx.typing_env(), Unnormalized::new_wip(ty));
+                    let actual_type = cx.tcx.normalize_erasing_regions(cx.typing_env(), ty);
                     let actual_type_di_node = type_di_node(cx, actual_type);
                     let name = name.as_str();
                     unsafe {

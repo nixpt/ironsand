@@ -503,10 +503,6 @@ impl<'ll, 'tcx, 'a> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         }
     }
 
-    fn alloca_with_ty(&mut self, layout: TyAndLayout<'tcx>) -> &'ll Value {
-        self.alloca(layout.size, layout.align.abi)
-    }
-
     fn load(&mut self, ty: &'ll Type, ptr: &'ll Value, align: Align) -> &'ll Value {
         trace!("Load {ty:?} {:?}", ptr);
         let ptr = self.pointercast(ptr, self.cx.type_ptr_to(ty));
