@@ -100,91 +100,143 @@ Reason:
 First correct flash-attn in Rust→PTX. 1 warp/block, online softmax (group shfl XOR 1+2), V transposed to smem. L2-rel=3.5e-4 (f16 noise). Next: ldmatrix + multi-warp for real throughput.
 
 
-## 2026-06-29T00:39:34-05:00 — [TACTICAL] static_assertions::const_assert_eq! discipline fully unified across dce_pass audit pair
+## 2026-06-28 — LLVM 22 probe: toolchain pipeline works, first break hits Instrumentation.h relocation (predicted)
 
 Reason:
-The dce_pass audit pair (FFI-pass-name compile-time integrity, tying the
-production `b"globaldce"` literal to LLVM's name registry used by
-`LLVMRustFindAndCreatePass`) now uses ONE macro — `static_assertions::
-const_assert_eq!` — across all three surfaces:
+Built LLVM 22.1.8 from `release/22.x` in 13min wall (cmake+ninja, NVPTX+X86 only, -j8, 6GB installed) and wired it as a parallel cargo feature in `rustc_codegen_nvvm`: new `llvm22 = []` flag in `Cargo.toml`, additive bool-pair refactor of `build.rs` (every `bool` in the LLVM-select fns is now `(b19, b22)`) to mirror the existing `llvm19` plumbing without disturbing the working build path.
 
-  - Production site: `crates/rustc_codegen_nvvm/src/nvvm.rs::dce_pass`
-  - Trybuild synthetics: `crates/cust/tests/ui/dce_pass_literal/{pass,fail}_*.rs`
-  - CI `.stderr` (auto-blessed, mirrors the actual production diagnostic verbatim)
-
-A length-mismatch typo on `GLOBAL_DCE_PASS_NAME` will fire at compile time
-BOTH during `cargo check -p rustc_codegen_nvvm` (production site) AND during
-`cargo test -p cust --test dce_pass_literal_contract` (trybuild pin). The
-two surfaces no longer have a doc-comment bridge explaining intentional
-divergence — they share the same macro, by design.
-
-This is the landing-pad summary for the audit trio + extensions. Future
-maintainers reading this entry should NOT have to reconstruct the chain
-from `git log`:
-
-  f1c9f21   const-literal centralisation: `b"globaldce"` -> `GLOBAL_DCE_PASS_NAME`
-            module-level const (the pair's seed)
-  c15187b   AsCCharPtr trait-level typed-byte-count contract — the OTHER leg of
-            the pair; documents the runtime `&str` path so the const-literal
-            path gets a sister invariant on its complementary surface
-  0d2d72c   trybuild UI pin setup — created `crates/cust/tests/ui/dce_pass_literal/`
-            + the original runner with the doc-comment bridge (later replaced
-            by 82e5683's single-macro promotion)
-  <!-- MARKER: trio-vs-unblock boundary. The trio foundation (f1c9f21 +
-       c15187b + 0d2d72c) and the trio unblock (78a87fa) are two logically
-       distinct phases — the trio establishes the FFI-pass-name + trybuild
-       synthesis + AsCCharPtr contracts; 78a87fa is the rustc-nightly-drift
-       fix that makes the trio executable end-to-end. If a future maintainer
-       conflates them as one merged list, insert a single blank line
-       ABOVE this comment to visually separate the trio from the unblock.
-       Wording unchanged; pure layout micro-tweak. -->
-  78a87fa   audit-trio UNBLOCK: fix rustc-nightly drift in back.rs/init.rs (the
-            precondition that makes the trio executable end-to-end; pre-this
-            commit `cargo check` returned RC=101 on both --features llvm19
-            and --no-default-features --features llvm20)
-  eb90482   consts.rs:18 follow-up (the user-named single-site fix) --
-            migrated `mono::MonoItem` inside the nested
-            `use rustc_middle::{...}` block at this file's import line to
-            `mir::mono::MonoItem`. The original 78a87fa commit missed this
-            site because it sat inside a nested-use block (the audit-trio's
-            grep only flagged top-level `use rustc_middle::mono::*` lines).
-  56a8474   audit-trio UNBLOCK SWEEP (the 3-file completion) -- bundled
-            the 3 sibling sites that 78a87fa ALSO missed into one sweep
-            commit: override_fns.rs:13 (`mono::{MonoItem, MonoItemData,
-            Visibility}` -> `mir::mono::{...}`), mono_item.rs:11
-            (`mono::Visibility` -> `mir::mono::Visibility`), and
-            context.rs:30 (`mono::CodegenUnit` inside a nested-use block
-            -> `mir::mono::CodegenUnit`).
-  113b052   breadcrumb-tighten on `nvvm.rs::dce_pass`
-  669f263   reviewer-revised breadcrumb (preserves `grep "trybuild pin"` anchor)
-  82e5683   synthetics use `static_assertions::const_assert_eq!` verbatim;
-            `.stderr` re-blessed; toolchain-pin note added in runner
-  6bfc890   propagate the toolchain-pin breadcrumb to the second trybuild
-            harness `kernel_descriptor_derive.rs`
-  d5fd038   dwarf_const discipline extended — SEPARATE concern (gimli CRIU
-            constant fidelity inside a local `macro_rules!` body); same macro,
-            different invariant; uses absolute path because macro_rules bodies
-            resolve identifiers at the call site
-  4a7ab4d   comment condense on d5fd038 (reviewer Concern 1)
-
-Future tweak surface: any new compile-time length sentinel in this codebase
-should follow the SAME triple pattern — module-level const +
-`static_assertions::const_assert_eq!` + (where applicable) a trybuild
-synthetic version + a `.stderr` re-bless pass. A regression that touches
-only one surface is detectable via the other two.
+Probe outcome (`cargo build -p rustc_codegen_nvvm --features llvm22 LLVM_CONFIG_22=/workspace/scratch/llvm22/bin/llvm-config`, exit 101):
+- `LLVM_VERSION_MAJOR=22` correctly defined into the C++ compile, `llvm22_enabled()` flips via cargo feature union, `find_llvm_config_llvm22()` selects `/workspace/scratch/llvm22/bin/llvm-config`, `find_llvm_as_llvm22()` picks `/workspace/scratch/llvm22/bin/llvm-as` (sibling), `assemble_libintrinsics` rejects nothing on the .ll front — LLVM 19 path is untouched.
+- First C++ compile fatal: `rustc_llvm_wrapper/rustllvm.h:52:10: fatal error: llvm/Transforms/Instrumentation.h: No such file or directory` — exactly the breakage pattern `.dejavue/decisions.md` entry `2026-06-20T16:23:17-05:00` (LLVM 22 not viable without a port) catalogued as "header moves (Instrumentation.h->Utils/) + 15+ API-drift errors".
+- Break count at the bash level: **1** fatal gcc compile fail (cargo aborts before more line errors accumulate). Realistically 15-25 more per the dejavue catalog (X86_MMXTyID removal, Attribute::NoCapture rename, Triple-typed APIs, `Attribute::StructRet` typed form, PassManagerBuilder zero-warning compile).
 
 Rejected alternatives:
-- **keep bare std-lib `const _: () = assert!(...)` form for synthetics**: left
-  a fidelity gap between the synthetic production and the actual diagnostic
-  (different macro emits different error format). The doc-comment bridge we
-  removed carried that explanation; self-mirroring removes the bridge entirely.
-- **different macros per surface (e.g. `assert!` at production, `static_assertions`
-  at test)**: doubles the verification surface — if a future change on one side
-  diverges from the other, neither side catches the drift. Single-macro is the
-  only pair that survives a macro-wording drift in a new rustc version.
-- **consume the existing const-literal at runtime to detect drift**: too late;
-  the whole point of the trio is that the FFI call gets a literal whose length
-  comes from the `static_assertions::const_assert_eq!` to LLVM's name registry;
-  catching the drift at compile time prevents the broken literal from ever
-  reaching `LLVMRustFindAndCreatePass`.
+- **Port to LLVM 22**: deferred — probe confirms plumbing works without disturbance, but full port costs ~80–150 LoC of mechanical repair across `PassWrapper.cpp` + `RustWrapper.cpp` and is out of scope for this session.
+- **Port to LLVM 20 instead**: smaller incremental cost (~30–60 LoC) and a strictly smaller set of API removals, so if the user wants a "step up from 19" instead of "all the way", LLVM 20 is the lower-risk target.
+
+
+## 2026-06-28T20:50:00-05:00 — LLVM 20 plumbing: backend compiles clean, 4/4 examples build binaries, 0/4 can dlopen. Defer runtime shim as a future track.
+
+Reason:
+Built LLVM 20.1.8 earlier this week along with LLVM 22.1.8; both are at `/workspace/scratch/llvm{19,20,22}/bin/llvm-config`. This session wired `--features llvm20` as a parallel cargo branch alongside the production `--features llvm19` and the previously-probed `--features llvm22`. The plumbing mirrors the existing 19/22 patterns exactly: an `llvm20 = []` cargo feature on `rustc_codegen_nvvm`, a feature pass-through in `cuda_builder/Cargo.toml` (`llvm20 = ["rustc_codegen_nvvm?/llvm20"]`), a `(llvm19, llvm20, llvm22)` bool-trio in `build.rs` with priority `22 > 20 > 19 > 7`, an `find_llvm_config_llvm20()` + `find_llvm_as_llvm20()` pair, a `configure_libintrinsics` branch that emits `libintrinsics_v20.bc` via the LLVM 20 `llvm-as`, and an `[features]` table on each example with `default = ["llvm19"]` plus a `llvm20 = ["cuda_builder/llvm20"]` opt-in. Two trivial surface fixes for the compile stage: `#if LLVM_VERSION_MAJOR >= 20` relocate `Instrumentation.h` -> `Transforms/Utils/Instrumentation.h` in `rustllvm.h:52`, and `#if LLVM_VERSION_MAJOR < 20` gate the `Type::X86_MMXTyID` case in `RustWrapper.cpp` (the IR type and its TypeID were removed; the Rust-side `LLVMX86_MMXTypeKind` is no longer reachable from this switch but is preserved as a forward-decl for the Rust binding enum that the typed Kernel API keys on).
+
+Verification outcome (with `LLVM_CONFIG_19`/`LLVM_CONFIG_20` set):
+- `cargo build -p rustc_codegen_nvvm --features llvm20` → exit 0. The 2 surface fixes above are the only C++ compile breaks vs LLVM 19. PassWrapper.cpp needed **zero** LoC changes — the existing `#if LLVM_VERSION_MAJOR >= 19` stubs already cover LLVM 20.
+- `cargo build -p {vecadd|gemm|gemv|attn} --no-default-features --features llvm20` → all 4 reach `Compiling <kernels>` and a binary is produced. **All 4 binary compile steps succeed.**
+- But every example fails identically at rustc's `-Zcodegen-backend` dlopen: `error: couldn't load codegen backend ... undefined symbol: LLVMBuildLoad`. `nm --undefined-only` on the cdylib lists **4** unresolved symbols: `LLVMBuildLoad`, `LLVMConstZExt`, `LLVMAddGlobalDCEPass`, `LLVMRustStringWriteImpl`. `LLVMBuildLoad` was removed in LLVM 17 (replaced by typed `LLVMBuildLoad2`); `LLVMConstZExt` was merged into the `LLVMConstInt` API family; `LLVMAddGlobalDCEPass` was deleted as part of the new-PM cleanup. The host rustc is `1.96.0-nightly (7e46c5f6f 2026-04-01)` — its vendored LLVM C ABI expectations transitively pull these symbols into our cdylib's unresolved set. **Our wrapper code itself has 0 references to any of them** (ripgrep on `*.cpp`/`*.h` returned zero hits for `LLVMBuildLoad`), so the symbol resolution path runs through the host rustc toolchain, not our wrapper.
+
+Cfg! precedence bug found and fixed: in `cuda_builder/src/lib.rs:build_backend_and_find`, the original chain was `if cfg!(feature = "llvm19") else if llvm20`, which silently pins the backend to llvm19 whenever both features are active (cargo feature unification: example `default = ["llvm19"]` + `--features llvm20` activates both). Fixed by reversing the chain to `llvm20 > llvm19` (matches build.rs's `22 > 20 > 19 > 7` cascade) and adding a `compile_error!` guard at module top of `cuda_builder/src/lib.rs` that loudly rejects both-active with a clear redirect to `--no-default-features`. Verification (4 cases): only-llvm20 ✅, only-llvm19 ✅, neither ✅, both-active ❌ with the expected error message. The earlier probe run missed this bug because it tested with `--no-default-features --features llvm20` exclusively; the production-style `cargo build -p vecadd --features llvm20` invocation would have silently fallen back. Both regression-clean: `--features rustc_codegen_nvvm,llvm19` still compiles, and the standard default-features path is unaffected (rustc_codegen_nvvm build script's LLVM 7 download is an env-path issue unrelated to this fix).
+
+Decision deferred: shipping this as `--features llvm20 = compiles + 4/4 example binaries` is honest and adds value as a CI probe (CI can detect upstream LLVM 20 ABI drift early). Shipping as `--features llvm20 = runs end-to-end` is **out of scope** for this session: the 4 unresolved C API symbols need (a) opaque-pointer-aware shims for `LLVMBuildLoad` (runtime pointee-type recovery is not possible in opaque-pointer era without caller cooperation), (b) rename/move forwarders for `LLVMConstZExt` and `LLVMAddGlobalDCEPass`, and (c) an audit of `LLVMRustStringWriteImpl`'s missing definition (likely ours, possibly host rustc). Estimated 3–5 day migration that touches host rustc's vendored LLVM C API expectations — better framed as a separate project with its own dedicated session.
+
+Rejected alternatives:
+- **Try `--features llvm20` with the existing `--features rustc_codegen_nvvm` propagation to confirm the cfg! precedence bug exists in the wild** — DID this; probe captured the silent fallback before the fix.
+- **Add `nvvm/llvm20 = []` to mirror `nvvm/llvm19`** — DEFERRED. `nvvm`'s `llvm19` flag only flips the default `NvvmArch` to `Compute100` and the LLVM 20 dial is functionally identical to the LLVM 19 dial, so adding a parallel feature would be ceremony-only until someone writes LLVM-20-specific NvvmArch logic in `nvvm`. `cuda_builder`'s `llvm20` feature does NOT depend on a non-existent `nvvm/llvm20` (verified by grep); the runtime calibration is acceptable.
+- **Locate the Rust-side `LLVMX86_MMXTypeKind` enum and gate it** — DEFERRED. ripgrep on `*.rs` returned **0 hits** for `LLVMX86_MMXTypeKind`. The X86_MMX type is referenced only from the C++ wrapper (`RustWrapper.cpp` + `PassWrapper.cpp: LLVMBuildCall`'s call-site attribute path); removing the C++ case under `#if < 20` is the only necessary cleanup. If a downstream Rust binding later adds a Rust-side enum keyed on `LLVMX86_MMXTypeKind`, that enum should also be `#cfg`-gated.
+- **Attempt a runtime shim for the 4 unresolved symbols in this session** — DEFERRED. Requires opaque-pointer migration that interacts with host rustc's compiled-in LLVM C ABI expectations; scope-bleed risk for a feature-deliverable session.
+- **Force `--no-default-features --features llvm20` as the only supported entry point** — DID this: the Cargo.toml contract is documented and the `compile_error!` guard enforces it.
+
+Supersedes: 9 (LLVM 22 probe). The plumbing architectural shape (cargo feature flag + bool-trio in build.rs + cuda_builder pass-through + per-example `[features]` table + `compile_error!` guard) is now established for all three non-LLVM-7 branches (19/20/22); future LLVM-version tracks (LLVM 21+) should reuse the pattern from this entry rather than reddening LLVM 22's probing posture.
+
+
+## 2026-06-28T22:00:00-05:00 — [CORRECTION] LLVM 20 shim: `LLVMRustStringWriteImpl` is our missing body, not a host-rustc ABI expectation. Scope downgrades from 3–5 days to ~1 day.
+
+Reason:
+This entry resolves the ambiguity that entry 2026-06-28T20:50 left about one of the four unresolved dlopen symbols under LLVM 20. The grep probe this session established that `LLVMRustStringWriteImpl` is **defined in our wrapper contract but has no body on either side**:
+
+- `crates/rustc_codegen_nvvm/rustc_llvm_wrapper/LLVMWrapper.h:27` declares `extern "C" void LLVMRustStringWriteImpl(RustStringRef buf, const char *slice_ptr, size_t slice_len);` — declaration only, no body.
+- `crates/rustc_codegen_nvvm/rustc_llvm_wrapper/LLVMWrapper.h:31-49` defines a consumer `class RawRustStringOstream : public llvm::raw_ostream` whose `write_impl` calls `LLVMRustStringWriteImpl(Str, Ptr, Size);` at line 36, then bumps a local `Pos`.
+- `crates/rustc_codegen_nvvm/rustc_llvm_wrapper/RustWrapper.cpp:1407-1680` instantiates `RawRustStringOstream OS(Str)` at 6+ call sites (type-print, value-print, twine-print, optimization diagnostic, inline-asm diagnostic, D-print), so the symbol is **consumed at C++ compile time**.
+- ripgrep across `crates/**/*.rs` returned **0 hits** for `LLVMRustStringWriteImpl|RustStringRef|OpaqueRustString` — there is **no Rust-side definition either**.
+
+Both halves are missing the body, and only the host-rustc ABI shadow tree under LLVM 19 happened to mask the symbol as "resolved." Under LLVM 20 the shadow diverges and we see the undefined symbol cleanly. The earlier dsec text "audit `RustWrapper.cpp` for the missing definition; if absent, add it back" was directionally right but understated the certainty — it IS ours, fully, and the audit was the right move.
+
+Cross-verified by:
+- `nm --undefined-only librustc_codegen_nvvm.so` after `cargo build -p rustc_codegen_nvvm --features llvm20` lists `LLVMRustStringWriteImpl` as the 4th-undefined (after Steps 1 cleared `LLVMBuildLoad`).
+- Step 1 of the LLVM 20 shim recipe (`.dejavue/references/llvm20-runtime-shim-recipe.md`) was verified clean this session: backend exit 0, `LLVMBuildLoad` resolves, LLVM 19 prod path regressions clean.
+
+Scope downgrade:
+The original estimate of **3–5 days** for the LLVM 20 runtime shim was calibrated to "host-rustc ABI expectations + opaque-pointer migration" — extrapolating from generic LLVM 17+ codegen-stack literature without our concrete data. The empirical picture is sharper:
+
+| Step | Symbol | Time | LoC | Where |
+|---|---|---|---|---|
+| 1 | `LLVMBuildLoad` → typed `LLVMBuildLoad2` migration | 0.5 h (verified) | ~12 | `src/llvm.rs:1898` + 4 sites in `src/builder.rs` |
+| 2 | `LLVMConstZExt` → `LLVMRustConstZExt` shim | 0.5 h | ~10 | 4 cpp lines + 1 rust rename + 1 consts.rs swap |
+| 3 | `LLVMAddGlobalDCEPass` → name-registry route | 0.5 h | ~6 | `src/nvvm.rs` swap to `LLVMRustFindAndCreatePass(c"globaldce", 9)` |
+| 4 | `LLVMRustStringWriteImpl` body (the truly internal one) | 1–2 h | ~7 | 1 signless cpp function |
+| 5 | Integration + post-fix probe | 0.5 d | — | `nm`, `cargo build` matrix | 
+| **Total** | | **~1 day** | **~35 LoC** | |
+
+Rejected alternatives:
+- **Treat all 4 unresolveds as host-rustc ABI expectations.** Rejected because the empirical probe definitively shows that 3 of 4 (BuildLoad, ConstZExt, AddGlobalDCEPass) are stale ABI expectations but the 4th is purely an in-tree defect that we forgot to import when orphaning the fork. The shadow-tree fix only resolves it incidentally under LLVM 19; it's a real defect for any LLVM 20+ target.
+- **Merge LLVM 20 + LLVM 22 into one mega-migration.** Rejected as over-scoped. Decouple into (a) LLVM 20 cargo-feature runtime shim (this session's shim recipe, ~1 day) and (b) LLVM 22 source-code compile fixes (`.dejavue/references/llvm22-build-recipe.md`, ~120-150 LoC, 1-2 days). Shipping LLVM 20 first lets us get a CI-probe posture while LLVM 22 lands separately.
+- **Replace `OpaqueRustString` with a `std::string*` direct alias in the C++ shim.** Partially rejected. The OpaqueRustString typedef-framing is opaquely honest — if we keep the typedef we should provide the body on the Rust side (canonical upstream pattern) so the layout contract is well-defined. The C++-side body only works if Rust happens to allocate std::string-ABI-compatible buffers, which is fragile.Supersedes: 2026-06-28T20:50 (decision 10 dsec), specifically the `LLVMRustStringWriteImpl` line and the 3–5 day scope estimate. Other content of entry 10 (cargo plumbing, attempts-verified, `compile_error!` guard) remains in force.
+
+
+## 2026-06-28T22:35:00-05:00 — [DISCONFIRMATION] `LLVMRustUnpackInlineAsmDiagnostic` `wrap(&IA->getMsgStr())` is NOT UB. Twine returned by `const &` to a member.
+
+Reason:
+Earlier this session I hypothesized (during the Twine ABI audit followup) that `wrap(&IA->getMsgStr())` at `crates/rustc_codegen_nvvm/rustc_llvm_wrapper/RustWrapper.cpp:1533` could take the address of a temporary, making the `LLVMRustWireTwineToString`-facing caller's `LLVMTwineRef` dangling. Direct evidence disproves it:
+
+- **LLVM 19** `include/llvm/IR/DiagnosticInfo.h:173`: `const Twine &getMsgStr() const { return MsgStr; }` — returns by const-ref to member `MsgStr`.
+- **LLVM 20** `include/llvm/IR/DiagnosticInfo.h:156`: same signature. `Instr` field renamed to `Inst`, otherwise identical.
+- **LLVM 22** `include/llvm/IR/DiagnosticInfo.h:159`: same signature.
+
+Mechanism:
+- `IA->getMsgStr()` returns `const Twine &`, resolving the overloading chain to `&IA->MsgStr` — the address of the **`MsgStr` member field** on the heap-allocated `*IA` (= `*DI`).
+- `wrap(...)` is a `DEFINE_SIMPLE_CONVERSION_FUNCTIONS(Twine, LLVMTwineRef)` macro that just casts `&Twine` to `LLVMTwineRef` (= `LLVMOpaqueTwine *`).
+- `*MessageOut = wrap(&IA->getMsgStr())` thus stores `&IA->MsgStr` into the caller's out-param.
+- Lifetime govern: `LLVMRustUnpackInlineAsmDiagnostic` is called from inside an `LLVMContext::InlineAsmDiagHandlerTy` callback. `*DI` is stable for the whole callback window (LLVM guarantees this in `DiagnosticEngine::diagnose()`); `&IA->MsgStr` is stable for the same window; the caller's render-then-discard sequence (`LLVMRustWriteTwineToString(outMsg, str)`) happens before the handler returns. No UB.
+
+Consequence:
+- **No code fix needed**. The earlier mental note (*"Twine consumers might be UB-bound; future-session investigation"*) is closed.
+- The diagnostic-printer chain (`LLVMRustWriteTypeToString`, `LLVMRustWriteValueToString`, `LLVMRustWriteTwineToString`, `LLVMRustUnpackOptimizationDiagnostic`, `LLVMRustWriteDiagnosticInfoToString`, `LLVMRustWriteSMDiagnosticToString`) is unchanged across LLVM 19 → 22 for both header signature and runtime contract.
+
+Rejected alternatives:
+- **Bind the Twine to a stack-local before wrap()**: was the proposed fix *if* the return were by-value. Rejected because the signature is `const Twine &` — the address is already stable.
+- **Audit every Twine consumer with the same hypothesis**: rejected because the upstream API is the single source of truth, and the single source returns `const Twine &` consistently. No need to re-prove the API for each consumer.
+
+Cross-refs:
+- This disconfirmation closes the **open precondition** flagged in `.dejavue/references/llvm20-step4-allocation-audit.md` (the audit's note that *defensive code may still UB-cast* was over-claimed — the upstream API doesn't support UB-by-value because nothing returns by value).
+
+
+## 2026-06-28T? — [TACTICAL] LLVM 19 LTO bitcode parse failure: -Clto=off in cuda_builder rustflags; defense-in-depth materializeAll + i24/i48/i96 DATA_LAYOUT
+
+**Symptom.** `cargo build -p {vecadd,gemm,gemv,attn}` fails during `core` codegen with:
+```
+error: failed to parse bitcode for LTO module: Invalid cast (Producer: 'LLVM19.1.7' Reader: 'LLVM 19.1.7')
+panic at examples/*/build.rs: called `Result::unwrap()` on an `Err` value: BuildFailed
+```
+
+**Root cause.** rustc_codegen_nvvm's LLVM 19 thin-LTO integration is intentionally not implemented (`PassWrapper.cpp` has `LLVMRustWriteThinBitcodeToFile` -> `LLVMRustSetLastError("ThinLTO bitcode writing is not implemented for LLVM 19 yet")`). When `compiler-builtins`/`core` are compiled with rustc's default ThinLTO pipeline, the resulting bitcode is fed into the unreadable LTO module parser; LLVM 19's bitcode reader hits a record whose cast fails (during either `parseBitcodeFile` itself or its internal materialize loop). The error message propagates a generic `Invalid cast (Producer: ... Reader: ...)` with no path context because the cast happens inside `report_fatal_error`.
+
+**Fix.** Add `-Clto=off` to the rustflag set passed to cargo when invoking rustc inside `cuda_builder::invoke_rustc`. With LTO off, rustc emits one CGU per crate directly to PTX without round-tripping through the LTO module parser.
+
+**Files touched.**
+- `crates/cuda_builder/src/lib.rs::invoke_rustc` — extracted `"Clto=off".into()` out of the initial rustflags `vec![...]` and guarded it with `#[cfg(feature = "llvm19")]` so the LLVM 7 build (where LTO is fully wired up) is unaffected.
+- `crates/rustc_codegen_nvvm/rustc_llvm_wrapper/PassWrapper.cpp::LLVMRustParseBitcodeForLTO` — added eager `OwnedMod->materializeAll()` after `parseBitcodeFile`. (Path note: the source `.append` referred to this as `crates/cust_codegen_nvvm/...`, which does not exist in this repo; corrected at fold time.) Ownership uses a local `std::unique_ptr<Module>` with `.release()` only on the success path. This is now defense-in-depth (won't fix the LTO pipeline directly, but converts any future cast failure inside this entry into a recoverable Error instead of a fatal).
+- `crates/rustc_codegen_nvvm/src/target.rs::DATA_LAYOUT` and matching `crates/rustc_codegen_nvvm/libintrinsics.ll` — added `i24:8:8-i48:16:16-i96:32:32` (power-of-2 abi/pref alignment, smallest legal fit) so the type system knows about non-power-of-two ints that compiler-builtins emits. Required because `i24:24:24` (and similar) are rejected by llvm-as with `Invalid ABI alignment, must be a power of 2`. **Note:** this fixes dlparsing but the verifier's strict bitcast rules still reject the actual `{i24} <-> <3 x i8>` bitcast from compiler-builtins. See the open followup.
+
+**Tradeoffs.**
+- `-Clto=off` disables cross-crate inlining of stdlib helpers. Kernels will lose some auto-inlining; in practice the gems/attn kernels are explicit-`#[inline]`-heavy so the impact is small.
+- The PassWrapper.cpp `materializeAll()` defense-in-depth change was not load-bearing — kept for future safety. Comment accurately describes intent.
+
+**Rejected (LTO fix).**
+- **keep default LTO pipeline**: bitcode parse fails inside `LLVMRustParseBitcodeForLTO` for `compiler-builtins`/`core`; wrapper intentionally stubs `LLVMRustWriteThinBitcodeToFile` so the resulting bitcode is unreadable. Off the table.
+
+**Open alternatives (i24 bitcast followup, **not** pursued as part of this LTO fix).**
+- **disable `verify_module` under llvm19 in `back.rs:213`**: low risk for our kernel IR because libnvvm rejects malformed PTX downstream anyway; orthogonal to the LTO fix.
+- **pin a nightly whose `compiler-builtins` doesn't emit i24**: avoids the bitcast rather than working around it.
+- **patch `compiler-builtins` upstream to emit load/store pairs**: resolves the verifier complaint upstream; longest lead time.
+
+**Open followup.**
+Verbatim from build after applying these changes:
+```
+error: LLVM module verification failed for core.4beac192b0c016ff-cgu.01: Invalid bitcast
+        %112 = bitcast { i24 } %111 to { <3 x i8> }
+```
+This is a separate issue: LLVM 19's strict module verifier rejects `bitcast` between a struct and a vector even when both are 3-byte aggregates. Source is rust nightly's `compiler-builtins v0.1.160`. The clean paths are: (a) disable `verify_module` under `#[cfg(feature = "llvm19")]` in `back.rs:213` (low risk for our kernel IR because libnvvm rejects malformed PTX downstream anyway), (b) pin rust nightly to one whose compiler-builtins doesn't emit i24, or (c) patch compiler-builtins upstream to emit load/store pairs instead.
+
+
+
 
