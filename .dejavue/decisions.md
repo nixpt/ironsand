@@ -239,4 +239,62 @@ This is a separate issue: LLVM 19's strict module verifier rejects `bitcast` bet
 
 
 
+## 2026-06-29T21:30:00-05:00 — [TACTICAL] Stub out ThinLTO; thin-LTO bitcode pipeline provides zero NVVM value
+
+Reason:
+For the slim fork's purpose (Rust→PTX kernels for zorro inference), libnvvm does its own pipeline optimization downstream — LLVM thin-LTO's cross-CGU bitcode optimization provides essentially zero GPU-codegen benefit. Permanently stubbing `run_thin_lto` (`crates/rustc_codegen_nvvm/src/lib.rs:200-218`) and keeping `PassWrapper.cpp`'s `LLVMRustWriteThinBitcodeToFile` as the documentation-only "not implemented for LLVM 19 yet" stub matches the existing LTO-workaround ADR's posture (2026-06-28T? `-Clto=off` / `materializeAll` / `i24/i48/i96 DATA_LAYOUT`) and removes the drift-chase surface that the 2026-06-28T22:00 [CORRECTION] shim-correction ADR estimated at ~1 day / ~35 LoC.
+
+Rejected alternatives:
+- **chase the rustc nightly thin-LTO bitcode drift**: opaque-pointer migration for `LLVMBuildLoad` → `LLVMBuildLoad2` (4 sites in `src/builder.rs`), `LLVMRustStringWriteImpl` body (Step 4 in `.dejavue/references/llvm20-step4-allocation-audit.md`), rename forwarders for `LLVMConstZExt` and `LLVMAddGlobalDCEPass` (via `LLVMRustFindAndCreatePass(c"globaldce", 9)`). Buys near-zero benefit for GPU kernel codegen; multi-day scope for a feature that doesn't ship.
+- **mix of stub + chase**: two divergent code paths in a slim fork; compounds maintenance without delivering runtime.
+
+Tradeoffs:
+- This decision settles the slim project's LTO posture to "off by default, stubbed if forced" — same conceptual lane as the `#[cfg(feature = "llvm19")]`-gated `-Clto=off` rustflag in `cuda_builder::invoke_rustc`.
+- A canonical pattern emerges: anything that can't reach runtime cleanly is `#[cfg(feature = "llvm19")]`-gated, NOT chased. Phase-3d commit will fold this in alongside the llvm20 plumbing removal (companion ADR below).
+
+Notes:
+- Phase-3d execution: replace `run_thin_lto` body in `crates/rustc_codegen_nvvm/src/lib.rs` with an inline no-op returning `Ok((vec![], vec![]))` so the four unresolved C API symbols (`LLVMBuildLoad`, `LLVMConstZExt`, `LLVMAddGlobalDCEPass`, `LLVMRustStringWriteImpl`) churn-grep no longer matters. Estimated: 1 commit, ~10 LoC, included in phase-3d.
+
+
+## 2026-06-29T21:30:01-05:00 — [STRATEGIC] Keep DebugInfo scope; mitigate i24 bitcast via cfg-gated `verify_module`
+
+Reason:
+Debug symbols are critical for kernel development in this research sandbox: stepping through monomorphized flash-attn/v0-v7 PTX kernels and the GEMV ladder in CUDA-GDB / LLDB-GPU is high-leverage for the project's experimental arc. The recent audit-trio UNBLOCK (commits `78a87fa`, `eb90482`, `56a8474`) plus the `2026-06-29T00:38:12` `dwarf_const` discipline commit shows the fork has already invested in keeping debug-info codegen compile-time-clean (`static_assertions::const_assert_eq!` discipline unifying across `nvvm.rs::dce_pass` and the trybuild UI pins). The i24-bitcast open followup from the LTO ADR has a clean mitigation: option (a) — `#[cfg(feature = "llvm19")]`-gate on `llvm::verify_module(llmod)` in `back.rs` (libnvvm's downstream PTX acceptance is the actual correctness gate, so a skipped module-verifier is contained). ~10 LoC, no ABI risk.
+
+Rejected alternatives:
+- **nuke debug_info codegen entirely**: drop `src/debug_info/*` (mod.rs, metadata.rs, metadata/type_map.rs, enums.rs, create_scope_map.rs, dwarf_const.rs, namespace.rs, util.rs); ~1500-2000 LoC removed; loses CUDA-GDB / LLDB-GPU diagnostic value for the project's research output. The recent `dwarf_const` dce_pass discipline work makes this wasteful.
+- **pin a rust nightly whose `compiler-builtins` doesn't emit i24 bitcasts**: restricts the project's `nightly-2026-04-02` pin; the LTO-bitcode-parse ADR has already established that nightly pinning is a last resort.
+- **patch `compiler-builtins` upstream to emit load/store pairs instead of `i24` bitcasts**: multi-week community handshake. Doesn't fit a slim fork's handshake capacity.
+
+Tradeoffs:
+- Pattern emerges: all three open followups in this phase-3 family follow the `#[cfg(feature = "llvm19")]`-gate mitigation convention (`-Clto=off` rustflag, `materializeAll`, `i24/i48/i96 DATA_LAYOUT` → `verify_module` skip). Future drift mitigations inherit this idiom.
+- Risk profile: at most a Stratum dwarf-DIE class could be wrong; libnvvm rejects malformed PTX downstream regardless, so the contained cfg-gate can't leak past the codegen backend.
+
+Notes:
+- Phase-3c execution: in `crates/rustc_codegen_nvvm/src/back.rs::codegen`, gate the existing `#[cfg(feature = "llvm19")] if let Err(err) = llvm::verify_module(llmod) { ... }` block behind `#![cfg(not(feature = "llvm19"))]`, paired with `cfgs::feature = "llvm19_legacy_debuginfo"` if we ever want it back. Estimated 1 commit, ~15 LoC, included in phase-3c.
+
+
+## 2026-06-29T21:30:02-05:00 — [STRATEGIC] Drop llvm20 cargo feature entirely; pin codegen backend to LLVM 19 only
+
+Reason:
+CLAUDE.md operationally pins the build to LLVM 19 (`LLVM_CONFIG_19=/workspace/scratch/llvm19/bin/llvm-config`); no production runtime target uses LLVM 20. Maintaining the parallel cargo branch — `Cargo.toml::llvm20 = []`, `build.rs::find_llvm_config_llvm20()` / `find_llvm_as_llvm20()`, `cuda_builder::cfg!` cascade, per-example `[features]` table `llvm20 = ["cuda_builder/llvm20"]`, `compile_error!` guard — adds a drift-chase tax proportional to upstream-nightly LLVM C ABI evals. The 2026-06-28T20:50 plumbing ADR + 2026-06-28T22:00 [CORRECTION] shim-correction ADR catalogued 4 unresolved C ABI symbols (`LLVMBuildLoad`, `LLVMConstZExt`, `LLVMAddGlobalDCEPass`, `LLVMRustStringWriteImpl`) that block runtime dlopen; the empirical scope for a runtime shim converged to ~1 day / ~35 LoC (corrected from earlier 3-5 day estimate) but buys zero benefit for the slim fork's LLVM-19-pinned scope. Retiring the cargo feature removes a future agents' temptation to chase those symbols and unblocks phase-3d commit-by-commit progression.
+
+Rejected alternatives:
+- **keep llvm20 as a CI-probe**: the cargo feature stays; CI runs `cargo check -p rustc_codegen_nvvm --no-default-features --features llvm20` to detect upstream LLVM 20 ABI drift early. Marginal value: llvm20 isn't customer-facing for this fork (CLAUDE.md pins LLVM 19), so the probe's signal doesn't translate to customer-fix action.
+- **downgrade llvm20 to compile-only (drop per-example `[features]` table; keep backend probe)**: half-measure; still requires `build.rs::find_llvm_config_llvm20` + `cuda_builder::cfg!` chain maintenance for a downstream toolchain we explicitly don't run.
+
+Tradeoffs:
+- Removes ~50 LoC of plumbing across `rustc_codegen_nvvm/Cargo.toml`, `cuda_builder/Cargo.toml`, `crates/rustc_codegen_nvvm/build.rs`, and `crates/{gemm,gemv,attn,vecadd}/*/Cargo.toml` files (per-example `[features]` tables).
+- No end-to-end regression: the LLVM-19 path is untouched. CLAUDE.md remains the operational rule.
+- Closes the runtime-shim followup that the 2026-06-28T22:00 [CORRECTION] ADR estimated at ~1 day — that estimated shim work is now out-of-scope because llvm20 is out-of-scope.
+- The `bool`-pair cascade in `build.rs` (currently `(b19, b20, b22)`) can be collapsed back to `(llvm19_enabled)` after both llvm20 and llvm22 plumbing retire, per the 2026-06-20T16:23:17 LLVM-not-viable-without-a-port ADR.
+
+Supersedes: 2026-06-28T20:50 LLVM 20 plumbing ADR (the plumbing now retires rather than probe-mode), and 2026-06-28T22:00 [CORRECTION] LLVM 20 shim ADR (the runtime shim estimate is now out-of-scope). The llvm22 plumbing that was added in parallel (bool-pair refactor of `build.rs`) ALSO collapses in the same phase-3d commit.
+
+Notes:
+- Phase-3d execution: a single commit removes the `llvm20` plumbing, the `cuda_builder::cfg!` cascade, the per-example `[features]` tables, and collapses `build.rs`'s bool-pair cascade to `(b19)`. LLVM 22 plumbing retires in the same commit (was added together for the bool-pair refactor). Estimated: 1 commit, ~80 LoC deleted (negative diff), included in phase-3d.
+- Acknowledging: the 2026-06-28T20:50 ADR's "Supersedes: 9 (LLVM 22 probe)" line is partially walked back here — the plumbing-arch shape that ADR claimed for future LLVM-version tracks (LLVM 21+) is no longer canon for this fork. A future LLVM-19 replacement (LLVM 21+, LLVM 23+) would need a separate, deliberate track.
+
+
+
 
