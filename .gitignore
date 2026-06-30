@@ -20,5 +20,5 @@ rustc-ice-*.txt
 # Kernel build/run artifacts (noise from cargo run --release on examples/* kernels)
 *.log
 RC=*
-index.html
+/index.html
 
