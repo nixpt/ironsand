@@ -2,7 +2,6 @@
 use rustc_abi as abi;
 use rustc_abi::{self, BackendRepr, Float, HasDataLayout, Primitive, WrappingRange};
 use rustc_codegen_ssa::errors::InvalidMonomorphization;
-use rustc_codegen_ssa::mir::intrinsic::IntrinsicResult;
 use rustc_codegen_ssa::mir::operand::OperandValue;
 use rustc_codegen_ssa::mir::place::PlaceValue;
 use rustc_codegen_ssa::mir::{operand::OperandRef, place::PlaceRef};
@@ -240,18 +239,9 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
         &mut self,
         instance: ty::Instance<'tcx>,
         args: &[OperandRef<'tcx, &'ll Value>],
-        result_layout: ty::layout::TyAndLayout<'tcx>,
-        result_place: Option<PlaceValue<&'ll Value>>,
-    ) -> IntrinsicResult<'tcx, &'ll Value> {
-        // Phase-3b Tier-3c: upstream dropped the explicit `span` parameter;
-        // recover the effective span from the instance's def.
-        let span = self.tcx.def_span(instance.def_id());
-        // Use provided place, or a temporary alloca when the caller wants an SSA operand.
-        let (result, used_temp_alloca) = if let Some(place_val) = result_place {
-            (PlaceRef { val: place_val, layout: result_layout }, false)
-        } else {
-            (PlaceRef::alloca(self, result_layout), !result_layout.is_zst())
-        };
+        result: PlaceRef<'tcx, &'ll Value>,
+        span: Span,
+    ) -> Result<(), ty::Instance<'tcx>> {
 
         let tcx = self.tcx;
         let callee_ty = instance.ty(tcx, self.typing_env());
@@ -436,11 +426,7 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                         let selected =
                             OperandValue::Ref(PlaceValue::new_sized(ptr, true_val.align));
                         selected.store(self, result);
-                        return if used_temp_alloca {
-                            IntrinsicResult::Operand(self.load_operand(result).val)
-                        } else {
-                            IntrinsicResult::WroteIntoPlace
-                        };
+                        return Ok(());
                     }
                     (OperandValue::Immediate(_), OperandValue::Immediate(_))
                     | (OperandValue::Pair(_, _), OperandValue::Pair(_, _)) => {
@@ -448,7 +434,7 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                         let false_val = args[2].immediate_or_packed_pair(self);
                         self.select(cond, true_val, false_val)
                     }
-                    (OperandValue::ZeroSized, OperandValue::ZeroSized) => return IntrinsicResult::WroteIntoPlace,
+                    (OperandValue::ZeroSized, OperandValue::ZeroSized) => return Ok(()),
                     _ => span_bug!(span, "Incompatible OperandValue for select_unpredictable"),
                 }
             }
@@ -470,7 +456,7 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
             }
             sym::breakpoint => {
                 // debugtrap is not supported
-                return IntrinsicResult::WroteIntoPlace;
+                return Ok(());
             }
             sym::va_copy => {
                 self.call_intrinsic("llvm.va_copy", &[args[0].immediate(), args[1].immediate()])
@@ -530,21 +516,17 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                 if !result.layout.is_zst() {
                     self.store_to_place(load, result.val);
                 }
-                return if used_temp_alloca {
-                    IntrinsicResult::Operand(self.load_operand(result).val)
-                } else {
-                    IntrinsicResult::WroteIntoPlace
-                };
+                return Ok(());
             }
             sym::volatile_store => {
                 let dst = args[0].deref(self.cx());
                 args[1].val.volatile_store(self, dst);
-                return IntrinsicResult::WroteIntoPlace;
+                return Ok(());
             }
             sym::unaligned_volatile_store => {
                 let dst = args[0].deref(self.cx());
                 args[1].val.unaligned_volatile_store(self, dst);
-                return IntrinsicResult::WroteIntoPlace;
+                return Ok(());
             }
             sym::prefetch_read_data
             | sym::prefetch_write_data
@@ -621,7 +603,7 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                 if !ty.is_integral() {
                     tcx.dcx()
                         .emit_err(InvalidMonomorphization::BasicIntegerType { span, name, ty });
-                    return IntrinsicResult::WroteIntoPlace;
+                    return Ok(());
                 }
                 let (size, signed) = ty.int_size_and_signed(self.tcx);
                 let width = size.bits();
@@ -709,7 +691,7 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                                 name: sym::raw_eq,
                                 ty: tp_ty,
                             });
-                        return IntrinsicResult::WroteIntoPlace;
+                        return Ok(());
                     }
                     BackendRepr::Memory { .. } => {
                         // For rusty ABIs, small aggregates are actually passed
@@ -780,11 +762,7 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                 .unwrap_or_else(|| bug!("failed to generate inline asm call for `black_box`"));
 
                 // We have copied the value to `result` already.
-                return if used_temp_alloca {
-                    IntrinsicResult::Operand(self.load_operand(result).val)
-                } else {
-                    IntrinsicResult::WroteIntoPlace
-                };
+                return Ok(());
             }
 
             // is this even supported by nvvm? i did not find a definitive answer
@@ -799,7 +777,7 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                         intrinsic.name,
                     );
                 }
-                return IntrinsicResult::Fallback(rustc_middle::ty::Instance::new_raw(
+                return Err(rustc_middle::ty::Instance::new_raw(
                     instance.def_id(),
                     instance.args,
                 ));
@@ -817,11 +795,7 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                     .store(self, result);
             }
         }
-        if used_temp_alloca {
-            IntrinsicResult::Operand(self.load_operand(result).val)
-        } else {
-            IntrinsicResult::WroteIntoPlace
-        }
+        Ok(())
     }
 
     fn codegen_llvm_intrinsic_call(

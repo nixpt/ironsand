@@ -24,5 +24,7 @@ rustc-ice-*.txt
 
 # Verification scratch files produced by example clean_noise.sh audits.
 # Catch these before they leak into `git status` as untracked noise.
-examples/**/.scratch_*
+# Trailing slash matches DIRECTORIES only — stray `.scratch_*` files
+# (e.g. a one-off log) are still tracked so we notice them.
+examples/**/.scratch_*/
 
