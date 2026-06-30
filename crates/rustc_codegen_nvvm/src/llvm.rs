@@ -974,11 +974,9 @@ unsafe extern "C" {
         AddressSpace: c_uint,
     ) -> &'a Value;
     // `LLVMAddGlobalDCEPass` was removed from the LLVM C API in LLVM 17.
-    // LLVM 7 (default features) still ships the symbol; LLVM 19, 20, and 22
-    // do not. The LLVM 19/20/22 path routes through the name-registry shim
-    // `LLVMRustFindAndCreatePass(c"globaldce", 9)` and `LLVMRustAddPass`
-    // (see `dce_pass` in `src/nvvm.rs`).
-    #[cfg(not(any(feature = "llvm19", feature = "llvm20", feature = "llvm22")))]
+    // LLVM 7 (default features) still ships the symbol; LLVM 19 does not.
+    // The LLVM 19 path skips the DCE pass entirely (see `dce_pass` in `src/nvvm.rs`).
+    #[cfg(not(feature = "llvm19"))]
     pub(crate) fn LLVMAddGlobalDCEPass(PM: &mut PassManager);
     pub(crate) fn LLVMGetNamedMetadataOperands(M: &Module, name: *const c_char, Dest: *mut &Value);
     pub(crate) fn LLVMGetNamedMetadataNumOperands(M: &Module, name: *const c_char) -> c_uint;
@@ -1590,11 +1588,10 @@ unsafe extern "C" {
     ) -> &'a Value;
     // `LLVMConstZExt` was removed from the LLVM C API in LLVM 17; LLVM 7
     // still ships the untyped form, so declare it for the LLVM 7 default-
-    // features path only. LLVM 19+ (including 20/22) gets the Rust-side shim
-    // `LLVMRustConstZExt` declared below.
-    #[cfg(not(any(feature = "llvm19", feature = "llvm20", feature = "llvm22")))]
+    // features path only. The LLVM 19 path routes all uses through the
+    // Rust-side shim `LLVMRustConstZExt` declared unconditionally below.
+    #[cfg(not(feature = "llvm19"))]
     pub(crate) fn LLVMConstZExt<'a>(ConstantVal: &'a Value, ToType: &'a Type) -> &'a Value;
-    #[cfg(any(feature = "llvm20", feature = "llvm22"))]
     pub(crate) fn LLVMRustConstZExt<'a>(
         ConstantVal: &'a Value,
         ToType: &'a Type,
@@ -1917,9 +1914,9 @@ unsafe extern "C" {
         Name: *const c_char,
     ) -> &'a Value;
     // Untyped `LLVMBuildLoad` was removed in LLVM 17; LLVM 7 still ships the
-    // symbol. LLVM 19+ (incl. 20/22) routes everything through `LLVMBuildLoad2`
+    // symbol. The LLVM 19 path routes everything through `LLVMBuildLoad2`
     // (see cfg-dispatched call sites in `src/builder.rs`).
-    #[cfg(not(any(feature = "llvm19", feature = "llvm20", feature = "llvm22")))]
+    #[cfg(not(feature = "llvm19"))]
     pub(crate) fn LLVMBuildLoad<'a>(
         B: &Builder<'a>,
         PointerVal: &'a Value,

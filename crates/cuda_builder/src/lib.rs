@@ -1,21 +1,5 @@
 //! Utility crate for easily building CUDA crates using rustc_codegen_nvvm. Derived from rust-gpu's spirv_builder.
 
-// The `llvm19` and `llvm20` cargo features on `cuda_builder` translate to a
-// `cfg(feature = "...")` gate that the nested backend build reads to pick the
-// LLVM toolchain. Both features can technically be active at the same time
-// (cargo feature unification doesn't have mutual exclusion), and doing so
-// would silently pin the backend to whichever wins the dispatch priority in
-// `build_backend_and_find` below — almost certainly NOT what the user wanted.
-// Reject the ambiguous configuration loudly so the user gets a clear pointer
-// to `--no-default-features --features llvmXX` instead of a confusing
-// toolchain mismatch downstream.
-#[cfg(all(feature = "llvm19", feature = "llvm20"))]
-compile_error!(
-    "Cannot enable both `llvm19` and `llvm20` features on cuda_builder simultaneously. \
-     To use LLVM 20, build the example with `--no-default-features --features llvm20` \
-     (so `default = [\"llvm19\"]` is disabled and only `llvm20` is active)."
-);
-
 pub use nvvm::*;
 use serde::Deserialize;
 use std::{
@@ -574,17 +558,8 @@ fn build_backend_and_find(filename: &str) -> Option<PathBuf> {
 
     // Propagate the active LLVM-version cargo feature to the nested backend build.
     // Without this, `rustc_codegen_nvvm`'s build script falls through to the prebuilt
-    // LLVM 7 download, which the LLVM 19/20 codegen paths can't link against.
-    //
-    // Priority matches `rustc_codegen_nvvm`'s `required_major_llvm_version` cascade
-    // (22 > 20 > 19 > 7), so a hypothetical future `llvm22` feature on `cuda_builder`
-    // would win over `llvm20` here too. Only one of these features should ever be
-    // active at a time; see the `compile_error!` guards at the top of this file.
-    if cfg!(feature = "llvm20") {
-        cmd.args(["--features", "llvm20"]);
-    } else if cfg!(feature = "llvm19") {
-        cmd.args(["--features", "llvm19"]);
-    }
+    // LLVM 7 download, which the LLVM 19 codegen path can't link against.
+    cmd.args(["--features", "llvm19"]);
 
     let status = cmd.status().ok()?;
 
@@ -737,7 +712,7 @@ fn invoke_rustc(builder: &CudaBuilder) -> Result<PathBuf, CudaBuilderError> {
         "-Cpanic=immediate-abort".into(),
     ];
 
-    // LLVM 19's and LLVM 20's ThinLTO support in rustc_codegen_nvvm is gated
+    // LLVM 19's ThinLTO support in rustc_codegen_nvvm is gated
     // behind `LLVMRustThinLTOAvailable() == false` (see PassWrapper.cpp); the
     // bitcode round-trip through `LLVMRustParseBitcodeForLTO` falls through to
     // the eager `materializeAll` path which the LLVM ≥19 BitcodeReader trips
@@ -746,7 +721,7 @@ fn invoke_rustc(builder: &CudaBuilder) -> Result<PathBuf, CudaBuilderError> {
     // without the round-trip and the parse path is never reached. This matches
     // the LLVM 7 path's behavior. Skip the flag under the LLVM 7 path (where
     // LTO is fully wired up) to preserve cross-crate inlining of stdlib helpers.
-    #[cfg(any(feature = "llvm19", feature = "llvm20"))]
+    #[cfg(feature = "llvm19")]
     rustflags.push("-Clto=off".into());
 
     if let Some(emit) = &builder.emit {
@@ -836,25 +811,13 @@ fn invoke_rustc(builder: &CudaBuilder) -> Result<PathBuf, CudaBuilderError> {
     //   - `rustc_codegen_nvvm/llvmXX` works as long as `rustc_codegen_nvvm`
     //     is anywhere in the inner-cargo dep graph (it is, via cuda_std)
     //
-    // The outer `compile_error!` mutual-exclusion guard at the top of this
-    // file ensures exactly one of these features is active here, so the
-    // if/else if/else if chain is exhaustive over the current feature set.
-    // If a future feature (e.g. `llvm23`) is added, update this chain or
-    // the silence will silently regress to default-features.
-    // `#[allow(unexpected_cfgs)]` — the `llvm22` branch is a forward-compat hook
-    // for the matching feature pending declaration in cuda_builder's `[features]`
-    // (rustc_codegen_nvvm already declares it, see its `required_major_llvm_version`
-    // cascade `22 > 20 > 19 > 7`). Drop this allow once
-    // `llvm22 = ["rustc_codegen_nvvm?/llvm22"]` lands in cuda_builder's Cargo.toml
-    // (matching the existing `llvm19` / `llvm20` weak-activation shape).
-    #[allow(unexpected_cfgs)]
-    if cfg!(feature = "llvm20") {
-        cargo.args(["--features", "rustc_codegen_nvvm/llvm20"]);
-    } else if cfg!(feature = "llvm19") {
-        cargo.args(["--features", "rustc_codegen_nvvm/llvm19"]);
-    } else if cfg!(feature = "llvm22") {
-        cargo.args(["--features", "rustc_codegen_nvvm/llvm22"]);
-    }
+    // Propagate the active LLVM-version cargo feature to the inner kernels
+    // build. The outer cargo is configuring the kernels compile to use
+    // `rustc_codegen_nvvm`, which routes through cuda_std and rebuilds
+    // `rustc_codegen_nvvm` itself; without `--features` here, that nested
+    // cargo defaults to no LLVM feature and links the legacy C-API cdylib,
+    // clobbering the llvm19 build at the same target-dir path.
+    cargo.args(["--features", "rustc_codegen_nvvm/llvm19"]);
 
     if builder.release {
         cargo.arg("--release");
