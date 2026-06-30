@@ -18,7 +18,7 @@ rustc-ice-*.txt
 .dejavue/timeline.jsonl.bak-*
 
 # Kernel build/run artifacts (noise from cargo run --release on examples/* kernels)
-*.log
-RC=*
+/*.log
+/RC=*
 /index.html
 
