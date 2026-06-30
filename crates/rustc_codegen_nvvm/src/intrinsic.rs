@@ -2,9 +2,10 @@
 use rustc_abi as abi;
 use rustc_abi::{self, BackendRepr, Float, HasDataLayout, Primitive, WrappingRange};
 use rustc_codegen_ssa::errors::InvalidMonomorphization;
+use rustc_codegen_ssa::mir::intrinsic::IntrinsicResult;
 use rustc_codegen_ssa::mir::operand::OperandValue;
 use rustc_codegen_ssa::mir::place::PlaceValue;
-use rustc_codegen_ssa::mir::{operand::OperandRef, place::PlaceRef, IntrinsicResult};
+use rustc_codegen_ssa::mir::{operand::OperandRef, place::PlaceRef};
 use rustc_codegen_ssa::traits::{
     BaseTypeCodegenMethods, BuilderMethods, ConstCodegenMethods, IntrinsicCallBuilderMethods,
     LayoutTypeCodegenMethods, OverflowOp,
@@ -240,9 +241,11 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
         instance: ty::Instance<'tcx>,
         args: &[OperandRef<'tcx, &'ll Value>],
         result_layout: ty::layout::TyAndLayout<'tcx>,
-        result_place: Option<rustc_codegen_ssa::mir::place::PlaceValue<&'ll Value>>,
-        span: Span,
-    ) -> rustc_codegen_ssa::mir::IntrinsicResult<'tcx, &'ll Value> {
+        result_place: Option<PlaceValue<&'ll Value>>,
+    ) -> IntrinsicResult<'tcx, &'ll Value> {
+        // Phase-3b Tier-3c: upstream dropped the explicit `span` parameter;
+        // recover the effective span from the instance's def.
+        let span = self.tcx.def_span(instance.def_id());
         // Use provided place, or a temporary alloca when the caller wants an SSA operand.
         let (result, used_temp_alloca) = if let Some(place_val) = result_place {
             (PlaceRef { val: place_val, layout: result_layout }, false)
@@ -830,9 +833,13 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
         let tcx = self.tcx;
 
         let fn_ty = instance.ty(tcx, self.typing_env());
+        // Phase-3b Tier-3e: `Binder::skip_normalization()` upstream moved onto
+        // `EarlyBinder<T>` shape (the result of `tcx.fn_sig(..).instantiate(..)`
+        // already strips bound regions without needing an extra call), so the
+        // explicit `.skip_normalization()` chain is gone.
         let fn_sig = match *fn_ty.kind() {
             ty::FnDef(def_id, args) => {
-                tcx.instantiate_bound_regions_with_erased(tcx.fn_sig(def_id).instantiate(tcx, args).skip_normalization())
+                tcx.instantiate_bound_regions_with_erased(tcx.fn_sig(def_id).instantiate(tcx, args))
             }
             _ => unreachable!(),
         };
@@ -937,9 +944,9 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
         self.const_i32(0)
     }
 
-    fn va_start(&mut self, va_list: &'ll Value) {
+    fn va_start(&mut self, va_list: &'ll Value) -> &'ll Value {
         trace!("Generate va_start `{:?}`", va_list);
-        self.call_intrinsic("llvm.va.start", &[va_list]);
+        self.call_intrinsic("llvm.va.start", &[va_list])
     }
 
     fn va_end(&mut self, va_list: &'ll Value) -> &'ll Value {

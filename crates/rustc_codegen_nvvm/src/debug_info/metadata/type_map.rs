@@ -3,7 +3,9 @@ use std::cell::RefCell;
 use rustc_abi::{Align, Size, VariantIdx};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
-use rustc_data_structures::stable_hasher::{HashStable as StableHash, StableHasher};
+use rustc_data_structures::stable_hasher::{
+    HashStable as StableHash, StableHasher,
+};
 use rustc_middle::bug;
 use rustc_middle::ty::{self, ExistentialTraitRef, Ty, TyCtxt};
 
@@ -15,14 +17,33 @@ use crate::llvm;
 use crate::llvm::debuginfo::{DIFlags, DIScope, DIType};
 
 mod private {
-    use rustc_macros::StableHash;
-
     // This type cannot be constructed outside of this module because
     // it has a private field. We make use of this in order to prevent
     // `UniqueTypeId` from being constructed directly, without asserting
     // the preconditions.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, StableHash)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct HiddenZst;
+
+    // Phase-3b Tier-3f: upstream `rustc_macros::StableHash` derive macro was
+    // removed; provide a manual `StableHash` trait impl so `UniqueTypeId`'s
+    // `#[derive(StableHash)]` (which transitively references `HiddenZst`)
+    // can still be derived. The trait is file-imported as
+    // `HashStable as StableHash` from `rustc_data_structures::stable_hasher`,
+    // and the convention both upstream derive and this manual impl share is a
+    // method named `stable_hash(&self, &mut HCX, &mut StableHasher)`.
+    impl<CTX> super::StableHash<CTX> for HiddenZst
+    where
+        CTX: rustc_data_structures::stable_hasher::StableHashingContext,
+    {
+        fn stable_hash(
+            &self,
+            _hcx: &mut CTX,
+            _hasher: &mut rustc_data_structures::stable_hasher::StableHasher,
+        ) {
+            // HiddenZst is a unit struct with no fields — there is literally
+            // nothing to fold into the stable fingerprint.
+        }
+    }
 }
 
 /// A unique identifier for anything that we create a debuginfo node for.

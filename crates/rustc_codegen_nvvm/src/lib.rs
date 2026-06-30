@@ -57,8 +57,8 @@ use rustc_ast::expand::allocator::AllocatorMethod;
 use rustc_codegen_ssa::{
     CompiledModule, CompiledModules, CrateInfo, ModuleCodegen, TargetConfig,
     back::{
-        lto::{SerializedModule, ThinModule},
-        write::{CodegenContext, FatLtoInput, ModuleConfig, OngoingCodegen, ThinLtoInput},
+        lto::{SerializedModule, ThinLtoInput, ThinModule},
+        write::{CodegenContext, FatLtoInput, ModuleConfig, OngoingCodegen},
     },
     traits::{CodegenBackend, ExtraBackendMethods, WriteBackendMethods},
 };
@@ -175,8 +175,13 @@ impl CodegenBackend for NvvmCodegenBackend {
             .unwrap_or_else(|| sess.target.cpu.to_string())
     }
 
-    fn codegen_crate<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Box<dyn std::any::Any> {
+    fn codegen_crate<'tcx>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        crate_info: &CrateInfo,
+    ) -> Box<dyn std::any::Any> {
         debug!("Codegen crate");
+        let _ = crate_info;
         Box::new(rustc_codegen_ssa::base::codegen_crate(
             Self, tcx,
         ))
@@ -187,14 +192,16 @@ impl CodegenBackend for NvvmCodegenBackend {
         ongoing_codegen: Box<dyn std::any::Any>,
         sess: &Session,
         _outputs: &OutputFilenames,
-        crate_info: &CrateInfo,
     ) -> (CompiledModules, WorkProductMap) {
         debug!("Join codegen");
+        // Phase-3b Tier-3: upstream `OngoingCodegen::join(sess)` returns a
+        // `UnordMap<K, V>`-themed view, but the trait's `WorkProductMap` is
+        // `IndexMap<K, V>`. Bridge the two via `iter` + `IndexMap::from_iter`.
         let (compiled_modules, work_products) = ongoing_codegen
             .downcast::<OngoingCodegen<Self>>()
             .expect("Expected OngoingCodegen, found Box<Any>")
-            .join(sess, crate_info);
-
+            .join(sess);
+        let work_products: WorkProductMap = work_products.into_iter().collect();
         (compiled_modules, work_products)
     }
 
@@ -268,8 +275,8 @@ impl WriteBackendMethods for NvvmCodegenBackend {
     }
 
     fn optimize_and_codegen_fat_lto(
-        _sess: &Session,
         _cgcx: &CodegenContext,
+        _prof: &SelfProfilerRef,
         _shared_emitter: &rustc_codegen_ssa::back::write::SharedEmitter,
         _tm_factory: rustc_codegen_ssa::back::write::TargetMachineFactoryFn<Self>,
         _exported_symbols_for_lto: &[String],
@@ -282,10 +289,11 @@ impl WriteBackendMethods for NvvmCodegenBackend {
     fn run_thin_lto(
         cgcx: &CodegenContext,
         _prof: &SelfProfilerRef,
+        _shared_emitter: &rustc_codegen_ssa::back::write::SharedEmitter,
         _dcx: DiagCtxtHandle<'_>,
         _exported_symbols_for_lto: &[String],
         _each_linked_rlib_for_lto: &[PathBuf],
-        modules: Vec<rustc_codegen_ssa::back::write::ThinLtoInput<Self>>,
+        modules: Vec<ThinLtoInput<Self>>,
     ) -> (Vec<ThinModule<Self>>, Vec<WorkProduct>) {
         // Partition ThinLtoInput enum variants into live vs cached modules.
         let mut modules_vec = Vec::new();
@@ -294,7 +302,10 @@ impl WriteBackendMethods for NvvmCodegenBackend {
             match m {
                 ThinLtoInput::Red { name, buffer } => modules_vec.push((name, buffer)),
                 ThinLtoInput::Green { wp, bitcode_path } => {
-                    let sm = SerializedModule::from_file(&bitcode_path);
+                    let sm = crate::lto::load_serialized_module_for_thin_lto(
+                        &bitcode_path,
+                        _dcx,
+                    );
                     cached_modules.push((sm, wp));
                 }
             }

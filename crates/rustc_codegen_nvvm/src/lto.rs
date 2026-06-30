@@ -89,7 +89,7 @@ pub(crate) fn run_thin(
 
     let shared = Arc::new(ThinShared {
         data: (),
-        thin_buffers: all_modules,
+        serialized_modules: all_modules,
         module_names,
     });
 
@@ -147,4 +147,35 @@ pub(crate) fn parse_module<'a>(
             crate::back::llvm_err(dcx, msg)
         })
     }
+}
+
+/// Thin-LTO "Green" cached modules come back as on-disk bitcode files rather than
+/// in-memory `ModuleBuffer`s; load each into a `Mmap` and wrap it in the upstream
+/// `SerializedModule::FromUncompressedFile` variant (Phase-3b Tier-3: replaces the
+/// old `SerializedModule::from_file` helper that upstream deleted).
+pub(crate) fn load_serialized_module_for_thin_lto(
+    path: &std::path::Path,
+    dcx: DiagCtxtHandle<'_>,
+) -> SerializedModule<ModuleBuffer> {
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(err) => {
+            crate::back::llvm_err(
+                dcx,
+                &format!("failed to open thin-LTO bitcode {}: {}", path.display(), err),
+            )
+            .raise()
+        }
+    };
+    let mmap = match unsafe { rustc_data_structures::memmap::Mmap::map(file) } {
+        Ok(m) => m,
+        Err(err) => {
+            crate::back::llvm_err(
+                dcx,
+                &format!("failed to mmap thin-LTO bitcode {}: {}", path.display(), err),
+            )
+            .raise()
+        }
+    };
+    SerializedModule::FromUncompressedFile(mmap)
 }

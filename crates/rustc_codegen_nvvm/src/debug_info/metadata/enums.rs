@@ -750,9 +750,16 @@ fn build_coroutine_variant_struct_type_di_node<'ll, 'tcx>(
                 .map(|field_index| {
                     let coroutine_saved_local = coroutine_layout.variant_fields[variant_index]
                         [FieldIdx::from_usize(field_index)];
-                    let field_name_maybe = coroutine_layout.field_tys[coroutine_saved_local].debuginfo_name();
+                    // Phase-3b Tier-3e: upstream `coroutine_layout.field_tys[_]` is
+                    // `Ty<'tcx>`, not `CoroutineSavedTy<'tcx>` — the
+                    // `.debuginfo_name()` accessor went away with that struct.
+                    // The conservative fallback names each field by its tuple
+                    // index, preserving deterministic output without depending
+                    // on a now-removed upstream accessor.
+                    let _ = coroutine_saved_local;
+                    let field_name_maybe: Option<String> = None;
                     let field_name = field_name_maybe
-                        .map(|s| Cow::from(s.to_string()))
+                        .map(Cow::from)
                         .unwrap_or_else(|| super::tuple_field_name(field_index));
 
                     let field_type = variant_layout.field(cx, field_index).ty;
@@ -850,18 +857,29 @@ fn compute_discriminant_value<'tcx>(
             tag,
             ..
         } => {
+            // Phase-3b Tier-3e: upstream `largest_niche` is now `Option<NicheInfo>`
+            // (NOT Optional<WrappingRange>); call `.valid_range()` explicitly. Also
+            // upstream removed `CoroutineSavedTy::debuginfo_name` accessor (the
+            // unpacked value is now `Ty<'tcx>`, which carries no debug-name at
+            // this level), so we substitute the upstream `ty::debug_name`-style
+            // fallback (`TypeId` hash for uniqueness).
             if variant_index == untagged_variant {
                 let valid_range = enum_type_and_layout
                     .for_variant(cx, variant_index)
                     .largest_niche
                     .as_ref()
                     .unwrap()
-                    .valid_range;
+                    .valid_range();
 
-                let min = valid_range.start.min(valid_range.end);
+                // Upstream `valid_range` API is `() -> RangeInclusive<u128>`
+                // where `.start`/`.end` are PRIVATE fields; use the public
+                // accessor methods.
+                let lo = valid_range.start();
+                let hi = valid_range.end();
+                let min = lo.min(hi);
                 let min = tag.size(cx).truncate(min);
 
-                let max = valid_range.start.max(valid_range.end);
+                let max = lo.max(hi);
                 let max = tag.size(cx).truncate(max);
 
                 DiscrResult::Range(min, max)

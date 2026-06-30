@@ -482,7 +482,12 @@ impl<'ll, 'tcx, 'a> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         val
     }
 
-    fn scalable_alloca(&mut self, _layout: rustc_middle::ty::layout::TyAndLayout<'tcx>) -> &'ll Value {
+    fn scalable_alloca(
+        &mut self,
+        _layout: rustc_middle::ty::layout::TyAndLayout<'tcx>,
+        _ty: &'ll Type,
+        _align: rustc_abi::Align,
+    ) -> &'ll Value {
         // NVVM (LLVM 7 + PTX) does not support scalable vector allocations;
         // declare the trait satisfied with an undef value to fall through.
         let void_ty = self.type_void();
@@ -714,9 +719,12 @@ impl<'ll, 'tcx, 'a> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         trace!("range metadata on {load:?}: {range:?}");
         unsafe {
             let llty = self.cx.val_ty(load);
+            // Phase-3b Tier-3e: upstream `WrappingRange` exposes `start` and `end` as
+            // public fields (not methods); switch from `range.start()`/`.end()` to
+            // field access.
             let v = [
-                self.cx.const_uint_big(llty, range.start()),
-                self.cx.const_uint_big(llty, range.end().wrapping_add(1)),
+                self.cx.const_uint_big(llty, range.start),
+                self.cx.const_uint_big(llty, range.end.wrapping_add(1)),
             ];
 
             llvm::LLVMSetMetadata(
