@@ -356,8 +356,9 @@ unsafe fn dce_pass(module: &Module) {
     {
         // The legacy C API entrypoint used below (`LLVMAddGlobalDCEPass`) is not
         // available on our current LLVM 19 runtime path. Keep the backend loadable
-        // by skipping this cleanup for now; revisit if LLVM 19 smoke tests show we
-        // need an explicit replacement pass.
+        // by intentionally skipping this cleanup for now; the post-LLVM 17
+        // rehydration shim is tractable via `LLVMRustFindAndCreatePass` when
+        // smoke tests prove the regression.
         let _ = module;
         return;
     }
