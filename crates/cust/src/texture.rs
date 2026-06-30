@@ -408,7 +408,7 @@ impl Drop for Texture {
     fn drop(&mut self) {
         unsafe {
             // drop the descriptor, which causes the array inside it to be dropped too
-            if false {
+            if self._destroy_array_on_destruct {
                 let res = self.resource_desc();
                 if let Ok(res) = res {
                     let _ = ManuallyDrop::into_inner(res);

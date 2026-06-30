@@ -100,7 +100,7 @@ impl<T: DeviceCopy> DeviceSlice<T> {
         Ok(vec)
     }
 
-    /* TODO (AL): keep these?
+    /*
     /// Divides one DeviceSlice into two at a given index.
     ///
     /// The first will contain all indices from `[0, mid)` (excluding the index `mid` itself) and

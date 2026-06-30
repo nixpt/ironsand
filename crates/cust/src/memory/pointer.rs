@@ -77,8 +77,6 @@ impl<T: DeviceCopy> DevicePointer<T> {
     }
 
     /// Returns a null device pointer.
-    ///
-    // TODO (AL): do we even want this?
     pub fn null() -> Self
     where
         T: Sized,

@@ -61,7 +61,6 @@ pub mod event;
 pub mod external;
 pub mod function;
 pub mod kernel;
-// WIP
 pub mod context;
 #[allow(warnings)]
 mod graph;
@@ -70,7 +69,6 @@ pub mod memory;
 pub mod module;
 pub mod prelude;
 pub mod stream;
-// WIP
 mod surface;
 mod texture;
 pub mod util;

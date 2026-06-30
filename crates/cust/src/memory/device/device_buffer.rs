@@ -51,7 +51,6 @@ impl<T: DeviceCopy> DeviceBuffer<T> {
         let ptr = if size > 0 && size_of::<T>() > 0 {
             unsafe { cuda_malloc(size)? }
         } else {
-            // FIXME (AL): Do we /really/ want to allow creating an invalid buffer?
             DevicePointer::null()
         };
         Ok(DeviceBuffer {
