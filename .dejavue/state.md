@@ -1,17 +1,29 @@
 # State
 
-Updated: 2026-06-30T16:30:00-05:00
+Updated: 2026-06-30
 
-**Phase-3b nightly-drift migration in progress:** `rustc_codegen_nvvm` targeting nightly-2026-04-02. 7 baseline residuals identified; residual #1 (`IntrinsicResult` migration in `intrinsic.rs`) eliminated via 5-step one-edit-at-a-time discipline. 6 residuals remain: `ThinLtoInput` import, `stable_hash`/`StableHashCtxt`/`HashStable` generics in debug_info/type_map, `scalable_alloca` in builder, and `join_codegen` IndexMap/UnordMap bridge. Phase-3d complete (llvm20/22 plumbing dropped, ~50 LoC removed). Phase-3e complete (obsolete references rationalized). Phase-3c (cfg-gated `verify_module` for i24 bitcast mitigation) pending.
+**Phase-3b nightly-drift migration COMPLETE.** All 7 `rustc_codegen_nvvm` residuals targeting nightly-2026-04-02 have been eliminated. `cargo check -p rustc_codegen_nvvm --features llvm19` compiles clean (0 errors, 3 pre-existing warnings: unused `dep_graph` import, unreachable call after `dcx.fatal()`, unused `load_serialized_module_for_thin_lto`). 6/6 unit tests pass (ptx_filter).
+
+Residuals resolved:
+- Residual #1 — `IntrinsicResult` migration in `intrinsic.rs`
+- Residual #2 — `ThinLtoInput` import removal + `codegen_crate(crate_info)` 3rd arg
+- Residual #3 — `StableHash`/`StableHashCtxt`/`HashStable` generics in `type_map.rs` (manual impl for `UniqueTypeId`)
+- Residual #4 — `scalable_alloca` signature update in `builder.rs`
+- Companion — `CastTarget::llvm_type` flat_map fix in `abi.rs`
+- Companion — `valid_range`/`start` field-vs-method fixes in `enums.rs`
+- Companion — `c_variadic` field access in `intrinsic.rs`
+- Companion — `run_thin_lto` signature alignment in `lib.rs`/`lto.rs`
+
+Phase-3d complete (llvm20/22 plumbing dropped, ~50 LoC removed). Phase-3e complete (obsolete references rationalized). **Phase-3c** (cfg-gated `verify_module` for i24 bitcast mitigation) pending — next step.
 
 **LLVM 19 pinned as sole codegen backend.** llvm20/22 cargo features removed. CLAUDE.md operative rule: `LLVM_CONFIG_19=/workspace/scratch/llvm19/bin/llvm-config`. ThinLTO stubbed (zero value for NVVM pipeline). DebugInfo scope retained for CUDA-GDB/LLDB-GPU kernel debugging.
 
 **Flash Attention v7 stable on main:** 6.4 TFLOP/s at H=32 (Dh=128, 5070 Ti), +55% over v4 baseline. Phase-8 XOR swizzle on V_T_SMEM eliminates 8-way bank conflicts. GQA and MQA variants also implemented. Br=32 attempted but reverted (warp-specialized softmax needed). `cp.async` pipelining tested & rejected.
 
-**GEMV decode series at plateau** (uncommitted on exp/gemv branch): Q4_K v3 (224-269 GB/s), Q6_K warp (~380 GB/s). Ternary dp4a optimization resolved ALU bottleneck (822 GB/s effective). Kernel families: f32, f16 vec4, int8 dp4a, ternary dp4a, Q4_K warp/fast/v3, Q6_K warp/fast. Next arc likely attention fusion or zorro decode integration.
+**GEMV decode series at plateau** (on exp/gemv branch): Q4_K v3 (224-269 GB/s), Q6_K warp (~380 GB/s). Ternary dp4a optimization resolved ALU bottleneck (822 GB/s effective). Kernel families: f32, f16 vec4, int8 dp4a, ternary dp4a, Q4_K warp/fast/v3, Q6_K warp/fast.
 
-**Haiku-San crate** (CPU/GPU hybrid orchestrator) extracted as standalone crate. Role-based decode kernels scaffolded (RoleRMSNormSingle, RoleGEMVDecodeSingle, RoleFlashAttnSingle). 4-week implementation plan drafted.
+**Haiku-San crate** (CPU/GPU hybrid orchestrator) extracted as standalone crate. Role-based decode kernels scaffolded (RoleRMSNormSingle, RoleGEMVDecodeSingle, RoleFlashAttnSingle).
 
 
-## 2026-06-30T08:26:54-05:00 — annotation
-state.md refreshed to reflect current project state: phase-3b drift migration (6/7 residuals remaining), flash attention v7 stable at 6.4 TFLOP/s, LLVM 19 pinned (llvm20/22 plumbing dropped), GEMV plateau, Haiku-San extracted
+## 2026-06-30 — annotation
+state.md updated: phase-3b marked complete. All 7 nightly-drift residuals resolved. rustc_codegen_nvvm compiles clean. Phase-3c (verify_module gate) is the next pending item.
