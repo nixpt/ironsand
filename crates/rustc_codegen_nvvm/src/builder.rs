@@ -482,6 +482,13 @@ impl<'ll, 'tcx, 'a> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         val
     }
 
+    fn scalable_alloca(&mut self, _layout: rustc_middle::ty::layout::TyAndLayout<'tcx>) -> &'ll Value {
+        // NVVM (LLVM 7 + PTX) does not support scalable vector allocations;
+        // declare the trait satisfied with an undef value to fall through.
+        let void_ty = self.type_void();
+        self.const_undef(void_ty)
+    }
+
     fn alloca(&mut self, size: Size, align: Align) -> &'ll Value {
         trace!("Alloca `{:?}`", size);
         let mut bx = Builder::with_cx(self.cx);
@@ -708,8 +715,8 @@ impl<'ll, 'tcx, 'a> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         unsafe {
             let llty = self.cx.val_ty(load);
             let v = [
-                self.cx.const_uint_big(llty, range.start),
-                self.cx.const_uint_big(llty, range.end.wrapping_add(1)),
+                self.cx.const_uint_big(llty, range.start()),
+                self.cx.const_uint_big(llty, range.end().wrapping_add(1)),
             ];
 
             llvm::LLVMSetMetadata(

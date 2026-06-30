@@ -11,7 +11,7 @@ use rustc_codegen_ssa::debuginfo::type_names;
 use rustc_codegen_ssa::mir::debuginfo::VariableKind::*;
 use rustc_codegen_ssa::mir::debuginfo::{DebugScope, FunctionDebugContext, VariableKind};
 use rustc_codegen_ssa::traits::*;
-use rustc_data_structures::unord::UnordMap;
+use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::def_id::{DefId, DefIdMap};
 use rustc_index::IndexVec;
 use rustc_middle::mir;
@@ -53,7 +53,7 @@ pub struct CodegenUnitDebugContext<'ll, 'tcx> {
     llcontext: &'ll llvm::Context,
     llmod: &'ll llvm::Module,
     builder: &'ll mut DIBuilder<'ll>,
-    created_files: RefCell<UnordMap<Option<(StableSourceFileId, SourceFileHash)>, &'ll DIFile>>,
+    created_files: RefCell<FxHashMap<Option<(StableSourceFileId, SourceFileHash)>, &'ll DIFile>>,
 
     type_map: metadata::TypeMap<'ll, 'tcx>,
     namespace_map: RefCell<DefIdMap<&'ll DIScope>>,
@@ -232,21 +232,22 @@ impl CodegenCx<'_, '_> {
     }
 }
 
-impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
-    pub fn create_function_debug_context(
+impl<'ll, 'tcx> DebugInfoCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
+    fn create_function_debug_context(
         &self,
         instance: Instance<'tcx>,
         fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
         llfn: &'ll Value,
         mir: &mir::Body<'tcx>,
-    ) -> Option<FunctionDebugContext<'tcx, &'ll DIScope, &'ll llvm::debuginfo::DILocation>> {
+    ) -> Option<FunctionDebugContext<'tcx, Self::DIScope, Self::DILocation>> {
         if self.sess().opts.debuginfo == DebugInfo::None {
             return None;
         }
 
         // Initialize fn debug context (including scopes).
+        let scope_fn = self.dbg_scope_fn(instance, fn_abi, Some(llfn));
         let empty_scope = DebugScope {
-            dbg_scope: self.dbg_scope_fn(instance, fn_abi, Some(llfn)),
+            dbg_scope: scope_fn,
             inlined_at: None,
             file_start_pos: BytePos(0),
             file_end_pos: BytePos(0),
@@ -261,9 +262,7 @@ impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
 
         Some(fn_debug_context)
     }
-}
 
-impl<'ll, 'tcx> DebugInfoCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
     fn dbg_scope_fn(
         &self,
         instance: Instance<'tcx>,

@@ -89,7 +89,7 @@ pub(crate) fn run_thin(
 
     let shared = Arc::new(ThinShared {
         data: (),
-        modules: all_modules,
+        thin_buffers: all_modules,
         module_names,
     });
 

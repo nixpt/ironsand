@@ -4,7 +4,6 @@ use rustc_abi::{Align, Size, VariantIdx};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::stable_hasher::{HashStable as StableHash, StableHasher};
-use rustc_macros::HashStable as StableHash;
 use rustc_middle::bug;
 use rustc_middle::ty::{self, ExistentialTraitRef, Ty, TyCtxt};
 
@@ -62,7 +61,7 @@ impl<'tcx> UniqueTypeId<'tcx> {
     pub fn for_enum_variant_part(tcx: TyCtxt<'tcx>, enum_ty: Ty<'tcx>) -> Self {
         assert_eq!(
             enum_ty,
-            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), Unnormalized::new_wip(enum_ty))
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), enum_ty)
         );
         UniqueTypeId::VariantPart(enum_ty, private::HiddenZst)
     }
@@ -74,7 +73,7 @@ impl<'tcx> UniqueTypeId<'tcx> {
     ) -> Self {
         assert_eq!(
             enum_ty,
-            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), Unnormalized::new_wip(enum_ty))
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), enum_ty)
         );
         UniqueTypeId::VariantStructType(enum_ty, variant_idx, private::HiddenZst)
     }
@@ -86,7 +85,7 @@ impl<'tcx> UniqueTypeId<'tcx> {
     ) -> Self {
         assert_eq!(
             self_type,
-            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), Unnormalized::new_wip(self_type))
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), self_type)
         );
         assert_eq!(
             implemented_trait,

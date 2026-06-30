@@ -942,6 +942,11 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
         self.call_intrinsic("llvm.va.start", &[va_list]);
     }
 
+    fn va_end(&mut self, va_list: &'ll Value) -> &'ll Value {
+        trace!("Generate va_end `{:?}`", va_list);
+        self.call_intrinsic("llvm.va.end", &[va_list])
+    }
+
 
 
 }
