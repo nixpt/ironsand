@@ -817,7 +817,18 @@ fn invoke_rustc(builder: &CudaBuilder) -> Result<PathBuf, CudaBuilderError> {
     // `rustc_codegen_nvvm` itself; without `--features` here, that nested
     // cargo defaults to no LLVM feature and links the legacy C-API cdylib,
     // clobbering the llvm19 build at the same target-dir path.
-    cargo.args(["--features", "rustc_codegen_nvvm/llvm19"]);
+    //
+    // CAVEAT (s397): this dep-feature flag only RESOLVES when the kernels
+    // crate lives in a workspace that contains `rustc_codegen_nvvm` as a
+    // member (all in-tree ironsand kernel subcrates). A workspace-DETACHED
+    // consumer (e.g. zorro-zazen's kernels/) errors with "package does not
+    // contain this feature", and for it the flag is also unnecessary — the
+    // backend dylib is built by the OUTER cargo and handed over by path, so
+    // there is no in-graph backend build to keep on the llvm19 feature.
+    // CUDA_BUILDER_NO_BACKEND_FEATURES=1 skips the flag for such consumers.
+    if std::env::var_os("CUDA_BUILDER_NO_BACKEND_FEATURES").is_none() {
+        cargo.args(["--features", "rustc_codegen_nvvm/llvm19"]);
+    }
 
     if builder.release {
         cargo.arg("--release");
