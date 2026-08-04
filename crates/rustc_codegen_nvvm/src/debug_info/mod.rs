@@ -233,35 +233,6 @@ impl CodegenCx<'_, '_> {
 }
 
 impl<'ll, 'tcx> DebugInfoCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
-    fn create_function_debug_context(
-        &self,
-        instance: Instance<'tcx>,
-        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
-        llfn: Self::Function,
-        mir: &mir::Body<'tcx>,
-    ) -> Option<FunctionDebugContext<'tcx, Self::DIScope, Self::DILocation>> {
-        if self.sess().opts.debuginfo == DebugInfo::None {
-            return None;
-        }
-
-        // Initialize fn debug context (including scopes).
-        let empty_scope = DebugScope {
-            dbg_scope: self.dbg_scope_fn(instance, fn_abi, Some(llfn)),
-            inlined_at: None,
-            file_start_pos: BytePos(0),
-            file_end_pos: BytePos(0),
-        };
-        let mut fn_debug_context = FunctionDebugContext {
-            scopes: IndexVec::from_elem(empty_scope, &mir.source_scopes),
-            inlined_function_scopes: Default::default(),
-        };
-
-        // Fill in all the scopes, with the information from the MIR body.
-        compute_mir_scopes(self, instance, mir, &mut fn_debug_context);
-
-        Some(fn_debug_context)
-    }
-
     fn dbg_scope_fn(
         &self,
         instance: Instance<'tcx>,
@@ -519,5 +490,19 @@ impl<'ll, 'tcx> DebugInfoCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                 },
             )
         }
+    }
+
+    fn dbg_create_lexical_block(&self, _pos: BytePos, _scope: Self::DIScope) -> Self::DIScope {
+        // Not properly implementing this for now - just return the parent scope
+        _scope
+    }
+
+    fn dbg_location_clone_with_discriminator(
+        &self,
+        _dbg_loc: Self::DILocation,
+        _discriminator: u32,
+    ) -> Option<Self::DILocation> {
+        // Not properly implementing this for now
+        None
     }
 }

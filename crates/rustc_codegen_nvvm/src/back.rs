@@ -16,7 +16,7 @@ use rustc_data_structures::profiling::SelfProfilerRef;
 use rustc_errors::{DiagCtxt, DiagCtxtHandle, FatalError};
 use rustc_fs_util::path_to_c_string;
 use rustc_middle::bug;
-use rustc_middle::mir::mono::{MonoItem, MonoItemData};
+use rustc_middle::mono::{MonoItem, MonoItemData};
 use rustc_middle::{dep_graph, ty::TyCtxt};
 use rustc_session::Session;
 use rustc_session::config::{self, DebugInfo, OutputType};

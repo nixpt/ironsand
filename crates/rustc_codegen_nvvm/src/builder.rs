@@ -503,8 +503,8 @@ impl<'ll, 'tcx, 'a> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         }
     }
 
-    fn scalable_alloca(&mut self, _elt: u64, _align: Align, _element_ty: Ty<'_>) -> &'ll Value {
-        self.unsupported("scalable vector allocas");
+    fn alloca_with_ty(&mut self, layout: TyAndLayout<'tcx, Ty<'tcx>>) -> &'ll Value {
+        self.alloca(layout.size, layout.align.abi)
     }
 
     fn load(&mut self, ty: &'ll Type, ptr: &'ll Value, align: Align) -> &'ll Value {
