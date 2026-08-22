@@ -11,6 +11,39 @@ LLVM 19. The official LLVM 19 release tarball (NOT from AUR — first-party
 `github.com/llvm/llvm-project`) is extracted at `/workspace/scratch/llvm19`
 (includes `llvm-config`, `llvm-as`, static libs, headers, `nvptx` component).
 
+## Provisioning (s472) — do not hand-extract
+
+```sh
+scripts/provision-llvm19.sh          # idempotent: fetch, verify, extract, self-check
+scripts/provision-llvm19.sh --check  # verify only; loud non-zero exit if unusable
+```
+
+Pinned artifact, verified against upstream's **SLSA/sigstore attestation**
+(`LLVM-19.1.7-Linux-X64.tar.xz.jsonl`, subject digest matched, builder
+`github-hosted actions runner`) — not merely self-consistent with whatever was
+downloaded:
+
+| | |
+|---|---|
+| version | 19.1.7 |
+| size | 1,653,440,720 B (1.65 GB) → ~8.2 GB extracted |
+| sha256 | `4a5ec53951a584ed36f80240f6fbf8fdd46b4cf6c7ee87cc2d5018dc37caf679` |
+
+**Why a script and not just this prose:** the prose already existed and the
+toolchain still vanished. `/workspace/scratch` is explicitly disposable
+("`rm -rf scratch/*` must always be safe"), so an 8.2 GB hand-extraction there
+is a capability with no restore path and no absence check. It was reclaimed,
+and `cargo build -p rustc_codegen_nvvm --features llvm19` failed with
+*"no LLVM 19 toolchain was found"* for weeks before anyone looked (s472).
+The script makes restore one command and makes absence loud.
+
+**Why we do NOT fork llvm-project:** we carry zero patches to LLVM. A fork's
+job is to hold patches (cf. `nixpt/llama.cpp` branch `nixpt-oracle`, which
+exists because we genuinely patch llama.cpp). Here we consume a prebuilt
+release artifact — forking the source would not even produce the binaries we
+link against, only an obligation to build LLVM ourselves. Pin the artifact,
+not the source.
+
 ## Environment
 
 ```sh
