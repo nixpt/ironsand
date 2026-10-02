@@ -31,7 +31,13 @@ Fallback if not on PATH: `python3 .dejavue/dejavue context`
 
 ## Build / Test
 
-- Needs LLVM **19** + CUDA 13.3. Env:
+- Needs LLVM **19** + CUDA 13.3. **Provision it with `scripts/provision-llvm19.sh`**
+  — do NOT assume it is present. The toolchain lives under `/workspace/scratch`,
+  which is disposable by policy; it HAS been reclaimed before, and because
+  nothing checked for it the CUDA codegen path died silently for weeks (s472).
+  `scripts/provision-llvm19.sh --check` is the loud-failure probe; wire it into
+  any preflight that claims the GPU path works.
+- Env (the script prints these):
   `CUDA_PATH=/opt/cuda`, `LLVM_CONFIG_19=/workspace/scratch/llvm19/bin/llvm-config`,
   `CARGO_TARGET_DIR=/workspace/scratch/builds/ironsand`.
 - Backend: `cargo build -p rustc_codegen_nvvm --features llvm19`.
