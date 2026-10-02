@@ -34,13 +34,13 @@
 
 extern crate alloc;
 
+pub mod atomic;
 pub mod float;
 #[allow(warnings)]
 pub mod intrinsics;
 pub mod io;
 pub mod mem;
 pub mod misc;
-pub mod atomic;
 pub mod ptr;
 pub mod quant;
 pub mod shared;

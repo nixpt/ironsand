@@ -185,10 +185,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ------------------------------------------------------------------
     use cust::kernel::Kernel;
 
-    let vecadd_typed: Kernel<_> = step!(
-        "VecAdd::load [KernelDescriptor]",
-        VecAdd::load(&module)
-    );
+    let vecadd_typed: Kernel<_> = step!("VecAdd::load [KernelDescriptor]", VecAdd::load(&module));
 
     // Manual tuple typing is still supported for ad-hoc use.
     let _vecadd_manual: Kernel<(

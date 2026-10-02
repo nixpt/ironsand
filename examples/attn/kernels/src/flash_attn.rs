@@ -27,14 +27,14 @@
 //! PV A: register-packed P values.
 //! PV B: ldmatrix.x2 (×1/n-tile) from V_T_smem col-major B layout.
 
+#[cfg(target_os = "cuda")]
+use core::arch::asm;
 use core::mem::MaybeUninit;
 use core::ptr::{addr_of, addr_of_mut};
+use cuda_std::GpuFloat;
 use cuda_std::address_space;
 use cuda_std::kernel;
 use cuda_std::thread;
-use cuda_std::GpuFloat;
-#[cfg(target_os = "cuda")]
-use core::arch::asm;
 
 use crate::mma_f16::mma_f16;
 
@@ -105,7 +105,6 @@ unsafe fn group_sum(mut v: f32) -> f32 {
     v += unsafe { shfl_xor_f32(v, 1) };
     v
 }
-
 
 /// Cooperative warp load of 4×(m8n8) f16 submatrices from shared memory into A-fragment regs.
 ///
@@ -239,17 +238,17 @@ pub unsafe fn flash_attn(
     // Smem: 3×4 KB = 12 KB (was 20 KB with O_SMEM) → 4 blocks/SM, 16 warps/SM.
 
     // Raw smem pointers — avoids Rust 2024 ban on &T/&mut T to static mut.
-    let q_smem  = addr_of_mut!(Q_SMEM)   as *mut MaybeUninit<u16>;
-    let k_smem  = addr_of_mut!(K_SMEM)   as *mut MaybeUninit<u16>;
-    let vt_smem = addr_of_mut!(V_T_SMEM)  as *mut MaybeUninit<u16>;
+    let q_smem = addr_of_mut!(Q_SMEM) as *mut MaybeUninit<u16>;
+    let k_smem = addr_of_mut!(K_SMEM) as *mut MaybeUninit<u16>;
+    let vt_smem = addr_of_mut!(V_T_SMEM) as *mut MaybeUninit<u16>;
 
-    let tid        = thread::thread_idx_x() as usize;
-    let warp_id    = tid / 32;   // 0..3
-    let lane       = tid % 32;   // lane within warp (0..31)
-    let grp        = lane / 4;   // groupID 0..7
-    let l2         = lane % 4;   // threadID-in-group 0..3
-    let h_idx      = thread::block_idx_y() as usize;  // head index
-    let qi_tile    = thread::block_idx_x() as usize;
+    let tid = thread::thread_idx_x() as usize;
+    let warp_id = tid / 32; // 0..3
+    let lane = tid % 32; // lane within warp (0..31)
+    let grp = lane / 4; // groupID 0..7
+    let l2 = lane % 4; // threadID-in-group 0..3
+    let h_idx = thread::block_idx_y() as usize; // head index
+    let qi_tile = thread::block_idx_x() as usize;
     let query_base = qi_tile * BR;
     if query_base >= l_seq {
         return;
@@ -257,16 +256,16 @@ pub unsafe fn flash_attn(
     // Compute head-specific base pointers ONCE (prologue, not hot loops).
     // All hot-loop address computation is then identical to single-head v4 —
     // the compiler can precompute per-thread smem address constants as before.
-    let q_head   = unsafe { q.as_ptr().add(h_idx * q_head_stride) };
-    let k_head   = unsafe { k.as_ptr().add(h_idx * kv_head_stride) };
-    let v_head   = unsafe { v.as_ptr().add(h_idx * kv_head_stride) };
-    let o_head   = unsafe { o.add(h_idx * q_head_stride) };
+    let q_head = unsafe { q.as_ptr().add(h_idx * q_head_stride) };
+    let k_head = unsafe { k.as_ptr().add(h_idx * kv_head_stride) };
+    let v_head = unsafe { v.as_ptr().add(h_idx * kv_head_stride) };
+    let o_head = unsafe { o.add(h_idx * q_head_stride) };
 
     let scale = 1.0f32 / (DH as f32).sqrt();
 
     // Each warp owns the Dh-slice [warp_id*DH_PER_WARP, (warp_id+1)*DH_PER_WARP).
     let dh_base = warp_id * DH_PER_WARP; // 0, 32, 64, or 96
-    let t_base  = warp_id * VTILES_PER_WARP; // 0, 4, 8, or 12
+    let t_base = warp_id * VTILES_PER_WARP; // 0, 4, 8, or 12
 
     // ── Load Q tile (2 vectorized 128-bit loads per thread) ─────────────────────
     // Thread tid handles 2 chunks of 8 consecutive u16s (one chunk per BR half):
@@ -279,7 +278,7 @@ pub unsafe fn flash_attn(
         let v4a = unsafe { ld_global_v4(q_head.add((query_base + row_a) * DH + col_a) as u64) };
         unsafe { st_shared_v4(q_smem.add(row_a * DH + col_a) as u64, v4a) };
 
-        let e_b   = tid + BLOCK_THREADS;
+        let e_b = tid + BLOCK_THREADS;
         let row_b = e_b >> 4;
         let col_b = (e_b & 15) << 3;
         let v4b = unsafe { ld_global_v4(q_head.add((query_base + row_b) * DH + col_b) as u64) };
@@ -290,12 +289,12 @@ pub unsafe fn flash_attn(
     // Per-thread O accumulators in f32 registers (no O_SMEM).
     // o_g[tt*2+r]  = O[grp,   dh_base + tt*8 + l2*2 + r]  (tt=0..3, r=0..1)
     // o_g8[tt*2+r] = O[grp+8, dh_base + tt*8 + l2*2 + r]
-    let mut o_g:  [f32; 8] = [0.0; 8];
+    let mut o_g: [f32; 8] = [0.0; 8];
     let mut o_g8: [f32; 8] = [0.0; 8];
 
-    let mut m_g  = f32::NEG_INFINITY;
+    let mut m_g = f32::NEG_INFINITY;
     let mut m_g8 = f32::NEG_INFINITY;
-    let mut l_g  = 0.0f32;
+    let mut l_g = 0.0f32;
     let mut l_g8 = 0.0f32;
 
     // ── KV loop ─────────────────────────────────────────────────────────────
@@ -310,7 +309,7 @@ pub unsafe fn flash_attn(
             let v4a = unsafe { ld_global_v4(k_head.add((kv_base + row_a) * DH + col_a) as u64) };
             unsafe { st_shared_v4(k_smem.add(row_a * DH + col_a) as u64, v4a) };
 
-            let e_b   = tid + BLOCK_THREADS;
+            let e_b = tid + BLOCK_THREADS;
             let row_b = e_b >> 4;
             let col_b = (e_b & 15) << 3;
             let v4b = unsafe { ld_global_v4(k_head.add((kv_base + row_b) * DH + col_b) as u64) };
@@ -326,7 +325,10 @@ pub unsafe fn flash_attn(
                 let bc = e / DH;
                 let dh = e % DH;
                 let bc_swizzled = bc ^ (((dh >> 3) & 1) * 8);
-                unsafe { (*vt_smem.add(dh * BC + bc_swizzled)).write(*v_head.add((kv_base + bc) * DH + dh)) };
+                unsafe {
+                    (*vt_smem.add(dh * BC + bc_swizzled))
+                        .write(*v_head.add((kv_base + bc) * DH + dh))
+                };
                 e += BLOCK_THREADS;
             }
         }
@@ -335,7 +337,7 @@ pub unsafe fn flash_attn(
         // ── QK^T: S[16,16] = Q_smem·K_smem^T / √Dh ─────────────────────────
         // All 4 warps compute the same S (redundant, but each warp needs its own copy
         // for independent online-softmax state and O accumulation).
-        let ksp     = addr_of!(K_SMEM) as *const u16;
+        let ksp = addr_of!(K_SMEM) as *const u16;
         let qsp_u16 = addr_of!(Q_SMEM) as *const u16;
 
         let mut s_j0 = [0.0f32; 4]; // n-tile j=0: KV rows 0-7
@@ -344,9 +346,9 @@ pub unsafe fn flash_attn(
         // Precomputed per-lane constants (hoisted out of k-loop by compiler):
         //   krow0 = K row for j=0 sub-matrix (0..7); krow1 = same for j=1 (8..15).
         //   kbase = (lane&8): 0 for lanes 0-7 (matrix 0), 8 for lanes 8-15 (matrix 1).
-        let krow0 = lane & 7;        // 0..7
-        let krow1 = krow0 + 8;      // 8..15
-        let kbase = lane & 8;        // 0 or 8
+        let krow0 = lane & 7; // 0..7
+        let krow1 = krow0 + 8; // 8..15
+        let kbase = lane & 8; // 0 or 8
 
         let mut kk = 0usize;
         while kk < DH / 16 {
@@ -378,10 +380,10 @@ pub unsafe fn flash_attn(
             let b = if s_j1[2] > s_j1[3] { s_j1[2] } else { s_j1[3] };
             if a > b { a } else { b }
         };
-        let m_tile_g  = unsafe { group_max(lm_g) };
+        let m_tile_g = unsafe { group_max(lm_g) };
         let m_tile_g8 = unsafe { group_max(lm_g8) };
-        let m_new_g   = if m_tile_g  > m_g  { m_tile_g  } else { m_g };
-        let m_new_g8  = if m_tile_g8 > m_g8 { m_tile_g8 } else { m_g8 };
+        let m_new_g = if m_tile_g > m_g { m_tile_g } else { m_g };
+        let m_new_g8 = if m_tile_g8 > m_g8 { m_tile_g8 } else { m_g8 };
 
         let p00 = (s_j0[0] - m_new_g).exp();
         let p01 = (s_j0[1] - m_new_g).exp();
@@ -392,20 +394,24 @@ pub unsafe fn flash_attn(
         let p88 = (s_j1[2] - m_new_g8).exp();
         let p89 = (s_j1[3] - m_new_g8).exp();
 
-        let l_tile_g  = unsafe { group_sum(p00 + p01 + p08 + p09) };
+        let l_tile_g = unsafe { group_sum(p00 + p01 + p08 + p09) };
         let l_tile_g8 = unsafe { group_sum(p80 + p81 + p88 + p89) };
 
-        let rescale_g  = (m_g  - m_new_g).exp();
+        let rescale_g = (m_g - m_new_g).exp();
         let rescale_g8 = (m_g8 - m_new_g8).exp();
 
-        m_g  = m_new_g;
+        m_g = m_new_g;
         m_g8 = m_new_g8;
-        l_g  = l_g  * rescale_g  + l_tile_g;
+        l_g = l_g * rescale_g + l_tile_g;
         l_g8 = l_g8 * rescale_g8 + l_tile_g8;
 
         // Rescale O registers (pure register ops — no smem traffic).
-        for v in &mut o_g  { *v *= rescale_g; }
-        for v in &mut o_g8 { *v *= rescale_g8; }
+        for v in &mut o_g {
+            *v *= rescale_g;
+        }
+        for v in &mut o_g8 {
+            *v *= rescale_g8;
+        }
 
         // ── PV: o_g/o_g8 += P · V_T_smem^T ─────────────────────────────────
         // P packed from registers — no P_SMEM. Fragment registers:
@@ -426,7 +432,7 @@ pub unsafe fn flash_attn(
         // Lane l provides column (l&7) of B sub-tile, rows start at (l&8), both swizzled:
         //   vt_row = t*8 + (l&7); vt_col_swizzled = (l&8) ^ (((vt_row >> 3) & 1) * 8)
         let vtsp = addr_of!(V_T_SMEM) as *const u16;
-        let vt_lane_koff = lane & 8;  // 0 for lanes 0-7, 8 for lanes 8-15
+        let vt_lane_koff = lane & 8; // 0 for lanes 0-7, 8 for lanes 8-15
         let mut t = t_base;
         while t < t_base + VTILES_PER_WARP {
             let tt = t - t_base;
@@ -435,9 +441,9 @@ pub unsafe fn flash_attn(
             let vt_addr = unsafe { vtsp.add(vt_row * BC + vt_col_swizzled) as u64 };
             let [b0, b1] = unsafe { ldmatrix_b2(vt_addr) };
             let d = unsafe { mma_f16(pa, [b0, b1], [0.0f32; 4]) };
-            o_g[tt * 2]      += d[0];
-            o_g[tt * 2 + 1]  += d[1];
-            o_g8[tt * 2]     += d[2];
+            o_g[tt * 2] += d[0];
+            o_g[tt * 2 + 1] += d[1];
+            o_g8[tt * 2] += d[2];
             o_g8[tt * 2 + 1] += d[3];
             t += 1;
         }
@@ -448,8 +454,12 @@ pub unsafe fn flash_attn(
     }
 
     // ── Normalize O = O / l (pure register ops) ─────────────────────────────
-    for v in &mut o_g  { *v /= l_g; }
-    for v in &mut o_g8 { *v /= l_g8; }
+    for v in &mut o_g {
+        *v /= l_g;
+    }
+    for v in &mut o_g8 {
+        *v /= l_g8;
+    }
 
     // ── Scatter O to global (each thread writes its 16 f16 cells directly) ───
     // No smem round-trip. Each thread owns dh = dh_base + tt*8 + l2*2 (+1) for tt=0..3.
@@ -459,8 +469,8 @@ pub unsafe fn flash_attn(
         let dh0 = dh_base + tt * 8 + l2 * 2;
         let dh1 = dh0 + 1;
         unsafe {
-            *o_head.add(out_base + grp * DH + dh0)       = cvt_f32_f16(o_g[tt * 2]);
-            *o_head.add(out_base + grp * DH + dh1)       = cvt_f32_f16(o_g[tt * 2 + 1]);
+            *o_head.add(out_base + grp * DH + dh0) = cvt_f32_f16(o_g[tt * 2]);
+            *o_head.add(out_base + grp * DH + dh1) = cvt_f32_f16(o_g[tt * 2 + 1]);
             *o_head.add(out_base + (grp + 8) * DH + dh0) = cvt_f32_f16(o_g8[tt * 2]);
             *o_head.add(out_base + (grp + 8) * DH + dh1) = cvt_f32_f16(o_g8[tt * 2 + 1]);
         }

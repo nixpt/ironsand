@@ -182,10 +182,9 @@ pub(crate) unsafe fn codegen(
     let mod_name = module.name.clone();
     let module_name = &mod_name[..];
 
-    let out = cgcx.output_filenames.temp_path_for_cgu(
-        OutputType::Object,
-        module_name,
-        None);
+    let out = cgcx
+        .output_filenames
+        .temp_path_for_cgu(OutputType::Object, module_name, None);
 
     // nvvm ir *is* llvm ir so emit_ir fits the expectation of llvm ir which is why we
     // implement this. this is copy and pasted straight from rustc_codegen_llvm
@@ -193,10 +192,9 @@ pub(crate) unsafe fn codegen(
     if config.emit_ir {
         let _timer =
             prof.generic_activity_with_arg("NVVM_module_codegen_emit_ir", &module.name[..]);
-        let out = cgcx.output_filenames.temp_path_for_cgu(
-            OutputType::LlvmAssembly,
-            module_name,
-            None);
+        let out =
+            cgcx.output_filenames
+                .temp_path_for_cgu(OutputType::LlvmAssembly, module_name, None);
         let out = out.to_str().unwrap();
 
         let result = unsafe {
@@ -265,13 +263,9 @@ pub fn compile_codegen_unit(tcx: TyCtxt<'_>, cgu_name: Symbol) -> (ModuleCodegen
     //   with_task(dep_node, tcx, task_arg: A: Debug, task_fn: fn(tc, A) -> R, hash_result: Option<fn(...) -> Fingerprint>)
     // Passing `cgu_name` as the (Debug) task_arg and `module_codegen` (a nested
     // `fn`, capturless -> fn pointer coercible) as the task_fn.
-    let (module, _) = tcx.dep_graph.with_task(
-        dep_node,
-        tcx,
-        cgu_name,
-        module_codegen,
-        None,
-    );
+    let (module, _) = tcx
+        .dep_graph
+        .with_task(dep_node, tcx, cgu_name, module_codegen, None);
 
     fn module_codegen(tcx: TyCtxt<'_>, cgu_name: Symbol) -> ModuleCodegen<LlvmMod> {
         let cgu = tcx.codegen_unit(cgu_name);

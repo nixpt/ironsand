@@ -3,9 +3,7 @@ use std::cell::RefCell;
 use rustc_abi::{Align, Size, VariantIdx};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
-use rustc_data_structures::stable_hasher::{
-    HashStable as StableHash, StableHasher,
-};
+use rustc_data_structures::stable_hasher::{HashStable as StableHash, StableHasher};
 use rustc_middle::bug;
 use rustc_middle::ty::{self, ExistentialTraitRef, Ty, TyCtxt};
 

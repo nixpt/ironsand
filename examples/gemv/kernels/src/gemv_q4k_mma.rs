@@ -34,7 +34,8 @@ const BLK: usize = 144; // bytes per Q4_K super-block
 #[inline(always)]
 unsafe fn mma_s8(a: [u32; 4], b: [u32; 2], c: [i32; 4]) -> [i32; 4] {
     let (mut d0, mut d1, mut d2, mut d3) = (c[0], c[1], c[2], c[3]);
-    unsafe {            core::arch::asm!(
+    unsafe {
+        core::arch::asm!(
                 "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {{{0}, {1}, {2}, {3}}}, {{{4}, {5}, {6}, {7}}}, {{{8}, {9}}}, {{{0}, {1}, {2}, {3}}};",
             inout(reg32) d0,
             inout(reg32) d1,

@@ -16,8 +16,8 @@ use cuda_std::*;
 /// **Per-call latency**: <100 μs (target)
 #[kernel]
 pub unsafe fn role_rms_norm_single(
-    input: *const f32,      // [hidden_dim] - single row
-    output: *mut f32,       // [hidden_dim] - output
+    input: *const f32, // [hidden_dim] - single row
+    output: *mut f32,  // [hidden_dim] - output
     hidden_dim: u32,
     eps: f32,
 ) {
@@ -66,9 +66,9 @@ pub unsafe fn role_rms_norm_single(
 /// **Per-call latency**: <500 μs (target for 8192×8192)
 #[kernel]
 pub unsafe fn role_gemv_decode_single(
-    matrix: *const f32,     // [m × n] row-major
-    vector: *const f32,     // [n]
-    output: *mut f32,       // [m]
+    matrix: *const f32, // [m × n] row-major
+    vector: *const f32, // [n]
+    output: *mut f32,   // [m]
     m: u32,
     n: u32,
 ) {
@@ -121,10 +121,10 @@ pub unsafe fn role_gemv_decode_single(
 ///          write scores to shared memory for reuse
 #[kernel]
 pub unsafe fn role_flash_attn_single(
-    query: *const f32,      // [head_dim]
-    k_cache: *const f32,    // [seq_len × head_dim]
-    v_cache: *const f32,    // [seq_len × head_dim]
-    output: *mut f32,       // [head_dim]
+    query: *const f32,   // [head_dim]
+    k_cache: *const f32, // [seq_len × head_dim]
+    v_cache: *const f32, // [seq_len × head_dim]
+    output: *mut f32,    // [head_dim]
     head_dim: u32,
     seq_len: u32,
 ) {

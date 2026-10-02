@@ -59,12 +59,7 @@ pub fn rms_norm_single(input: &[f32], eps: f32) -> Vec<f32> {
 ///
 /// # Returns
 /// Output vector of size m
-pub fn gemv_decode_single(
-    matrix: &[f32],
-    vector: &[f32],
-    m: usize,
-    n: usize,
-) -> Vec<f32> {
+pub fn gemv_decode_single(matrix: &[f32], vector: &[f32], m: usize, n: usize) -> Vec<f32> {
     assert_eq!(matrix.len(), m * n, "Matrix size mismatch");
     assert_eq!(vector.len(), n, "Vector size mismatch");
 
@@ -72,10 +67,7 @@ pub fn gemv_decode_single(
 
     for i in 0..m {
         let row = &matrix[i * n..(i + 1) * n];
-        let dot_product: f32 = row.iter()
-            .zip(vector.iter())
-            .map(|(a, b)| a * b)
-            .sum();
+        let dot_product: f32 = row.iter().zip(vector.iter()).map(|(a, b)| a * b).sum();
         output[i] = dot_product;
     }
 
@@ -118,10 +110,7 @@ pub fn flash_attn_single(
     let mut scores = vec![0.0; seq_len];
     for s in 0..seq_len {
         let key = &k_cache[s * head_dim..(s + 1) * head_dim];
-        let score: f32 = query.iter()
-            .zip(key.iter())
-            .map(|(q, k)| q * k)
-            .sum();
+        let score: f32 = query.iter().zip(key.iter()).map(|(q, k)| q * k).sum();
         scores[s] = score / (head_dim as f32).sqrt(); // Scale by sqrt(head_dim)
     }
 
@@ -170,8 +159,8 @@ mod tests {
     fn test_gemv_decode() {
         // Simple 2x2 matrix
         let matrix = vec![
-            1.0, 2.0,  // row 0: [1, 2]
-            3.0, 4.0,  // row 1: [3, 4]
+            1.0, 2.0, // row 0: [1, 2]
+            3.0, 4.0, // row 1: [3, 4]
         ];
         let vector = vec![1.0, 2.0];
 
@@ -190,14 +179,14 @@ mod tests {
 
         let query = vec![1.0, 0.0, 0.0, 0.0];
         let k_cache = vec![
-            1.0, 0.0, 0.0, 0.0,  // key 0
-            0.0, 1.0, 0.0, 0.0,  // key 1
-            0.0, 0.0, 1.0, 0.0,  // key 2
+            1.0, 0.0, 0.0, 0.0, // key 0
+            0.0, 1.0, 0.0, 0.0, // key 1
+            0.0, 0.0, 1.0, 0.0, // key 2
         ];
         let v_cache = vec![
-            1.0, 0.0, 0.0, 0.0,  // val 0
-            0.0, 2.0, 0.0, 0.0,  // val 1
-            0.0, 0.0, 3.0, 0.0,  // val 2
+            1.0, 0.0, 0.0, 0.0, // val 0
+            0.0, 2.0, 0.0, 0.0, // val 1
+            0.0, 0.0, 3.0, 0.0, // val 2
         ];
 
         let output = flash_attn_single(&query, &k_cache, &v_cache, head_dim, seq_len);
@@ -213,6 +202,9 @@ mod tests {
 
         // Just verify it's a weighted combination (sum to around 1)
         let sum: f32 = output.iter().map(|x| x.abs()).sum();
-        assert!(sum > 0.5, "Output should be a weighted combination of values");
+        assert!(
+            sum > 0.5,
+            "Output should be a weighted combination of values"
+        );
     }
 }

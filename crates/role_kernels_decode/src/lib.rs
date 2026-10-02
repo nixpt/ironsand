@@ -107,7 +107,10 @@ pub fn launch_role_gemv_decode_single(
 
     unsafe {
         kernel.launch(
-            grid_size, BLOCK_SIZE, 0, stream,
+            grid_size,
+            BLOCK_SIZE,
+            0,
+            stream,
             (
                 matrix.as_device_ptr(),
                 vector.as_device_ptr(),
@@ -179,7 +182,10 @@ pub fn launch_role_rms_norm_single(
 
     unsafe {
         kernel.launch(
-            grid_size, BLOCK_SIZE, 0, stream,
+            grid_size,
+            BLOCK_SIZE,
+            0,
+            stream,
             (
                 input.as_device_ptr(),
                 output.as_device_ptr(),
@@ -263,7 +269,10 @@ pub fn launch_role_flash_attn_single(
 
     unsafe {
         kernel.launch(
-            grid_size, BLOCK_SIZE, 0, stream,
+            grid_size,
+            BLOCK_SIZE,
+            0,
+            stream,
             (
                 query.as_device_ptr(),
                 k_cache.as_device_ptr(),

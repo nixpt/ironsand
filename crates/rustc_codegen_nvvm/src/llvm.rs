@@ -1592,10 +1592,7 @@ unsafe extern "C" {
     // Rust-side shim `LLVMRustConstZExt` declared unconditionally below.
     #[cfg(not(feature = "llvm19"))]
     pub(crate) fn LLVMConstZExt<'a>(ConstantVal: &'a Value, ToType: &'a Type) -> &'a Value;
-    pub(crate) fn LLVMRustConstZExt<'a>(
-        ConstantVal: &'a Value,
-        ToType: &'a Type,
-    ) -> &'a Value;
+    pub(crate) fn LLVMRustConstZExt<'a>(ConstantVal: &'a Value, ToType: &'a Type) -> &'a Value;
     pub(crate) fn LLVMConstPtrToInt<'a>(ConstantVal: &'a Value, ToType: &'a Type) -> &'a Value;
     pub(crate) fn LLVMConstIntToPtr<'a>(ConstantVal: &'a Value, ToType: &'a Type) -> &'a Value;
     pub(crate) fn LLVMConstBitCast<'a>(ConstantVal: &'a Value, ToType: &'a Type) -> &'a Value;

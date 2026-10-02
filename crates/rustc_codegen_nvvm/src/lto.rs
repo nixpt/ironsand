@@ -162,23 +162,27 @@ pub(crate) fn load_serialized_module_for_thin_lto(
 ) -> SerializedModule<ModuleBuffer> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
-        Err(err) => {
-            crate::back::llvm_err(
-                dcx,
-                &format!("failed to open thin-LTO bitcode {}: {}", path.display(), err),
-            )
-            .raise()
-        }
+        Err(err) => crate::back::llvm_err(
+            dcx,
+            &format!(
+                "failed to open thin-LTO bitcode {}: {}",
+                path.display(),
+                err
+            ),
+        )
+        .raise(),
     };
     let mmap = match unsafe { rustc_data_structures::memmap::Mmap::map(file) } {
         Ok(m) => m,
-        Err(err) => {
-            crate::back::llvm_err(
-                dcx,
-                &format!("failed to mmap thin-LTO bitcode {}: {}", path.display(), err),
-            )
-            .raise()
-        }
+        Err(err) => crate::back::llvm_err(
+            dcx,
+            &format!(
+                "failed to mmap thin-LTO bitcode {}: {}",
+                path.display(),
+                err
+            ),
+        )
+        .raise(),
     };
     SerializedModule::FromUncompressedFile(mmap)
 }

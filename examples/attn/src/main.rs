@@ -52,7 +52,6 @@ kernel_descriptor! {
     );
 }
 
-
 fn time<F: FnMut() -> Result<(), Box<dyn Error>>>(
     stream: &Stream,
     warmups: usize,
@@ -114,11 +113,19 @@ fn run_mma_f16_spike(module: &Module, stream: &Stream) -> Result<(), Box<dyn Err
 
     let mma_f16_tile = mma_f16_tile::load(&module)?;
     unsafe {
-        mma_f16_tile.launch(1, 32, 0, stream, (
-            a_gpu.as_device_ptr(), a_gpu.len(),
-            b_gpu.as_device_ptr(), b_gpu.len(),
-            c_gpu.as_device_ptr(),
-        ))?;
+        mma_f16_tile.launch(
+            1,
+            32,
+            0,
+            stream,
+            (
+                a_gpu.as_device_ptr(),
+                a_gpu.len(),
+                b_gpu.as_device_ptr(),
+                b_gpu.len(),
+                c_gpu.as_device_ptr(),
+            ),
+        )?;
     }
     stream.synchronize()?;
 
@@ -269,13 +276,25 @@ fn run_flash_attn_shape(
     let kv_head_stride = s_seq * DH;
     let run = || -> Result<(), Box<dyn Error>> {
         unsafe {
-            flash_attn.launch((grid_x, grid_y), BLOCK, 0, stream, (
-                q_gpu.as_device_ptr(), q_gpu.len(),
-                k_gpu.as_device_ptr(), k_gpu.len(),
-                v_gpu.as_device_ptr(), v_gpu.len(),
-                o_gpu.as_device_ptr(),
-                l_seq, s_seq, q_head_stride, kv_head_stride,
-            ))?;
+            flash_attn.launch(
+                (grid_x, grid_y),
+                BLOCK,
+                0,
+                stream,
+                (
+                    q_gpu.as_device_ptr(),
+                    q_gpu.len(),
+                    k_gpu.as_device_ptr(),
+                    k_gpu.len(),
+                    v_gpu.as_device_ptr(),
+                    v_gpu.len(),
+                    o_gpu.as_device_ptr(),
+                    l_seq,
+                    s_seq,
+                    q_head_stride,
+                    kv_head_stride,
+                ),
+            )?;
         }
         Ok(())
     };
@@ -420,15 +439,25 @@ fn run_flash_attn_gqa(module: &Module, stream: &Stream) -> Result<(), Box<dyn Er
     const BLOCK: u32 = 128;
 
     unsafe {
-        flash_attn_gqa.launch((grid_x, grid_y), BLOCK, 0, stream, (
-            q_gpu.as_device_ptr(), q_gpu.len(),
-            k_gpu.as_device_ptr(), k_gpu.len(),
-            v_gpu.as_device_ptr(), v_gpu.len(),
-            o_gpu.as_device_ptr(),
-            l_seq, s_seq,
-            num_query_heads,
-            num_kv_heads,
-        ))?;
+        flash_attn_gqa.launch(
+            (grid_x, grid_y),
+            BLOCK,
+            0,
+            stream,
+            (
+                q_gpu.as_device_ptr(),
+                q_gpu.len(),
+                k_gpu.as_device_ptr(),
+                k_gpu.len(),
+                v_gpu.as_device_ptr(),
+                v_gpu.len(),
+                o_gpu.as_device_ptr(),
+                l_seq,
+                s_seq,
+                num_query_heads,
+                num_kv_heads,
+            ),
+        )?;
     }
     stream.synchronize()?;
 
@@ -527,15 +556,25 @@ fn run_mqa_test(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> 
     const BLOCK: u32 = 128;
 
     unsafe {
-        flash_attn_gqa.launch((grid_x, grid_y), BLOCK, 0, stream, (
-            q_gpu.as_device_ptr(), q_gpu.len(),
-            k_gpu.as_device_ptr(), k_gpu.len(),
-            v_gpu.as_device_ptr(), v_gpu.len(),
-            o_gpu.as_device_ptr(),
-            l_seq, s_seq,
-            num_query_heads,
-            num_kv_heads,
-        ))?;
+        flash_attn_gqa.launch(
+            (grid_x, grid_y),
+            BLOCK,
+            0,
+            stream,
+            (
+                q_gpu.as_device_ptr(),
+                q_gpu.len(),
+                k_gpu.as_device_ptr(),
+                k_gpu.len(),
+                v_gpu.as_device_ptr(),
+                v_gpu.len(),
+                o_gpu.as_device_ptr(),
+                l_seq,
+                s_seq,
+                num_query_heads,
+                num_kv_heads,
+            ),
+        )?;
     }
     stream.synchronize()?;
 

@@ -8,11 +8,11 @@
 //! f16→f32 uses the hardware `cvt.f32.f16` instruction via inline PTX (the
 //! `half` crate's `to_f32` lowers to a software bit-twiddling path instead).
 
+#[cfg(target_os = "cuda")]
+use core::arch::asm;
 use cuda_std::kernel;
 use cuda_std::thread;
 use cuda_std::warp;
-#[cfg(target_os = "cuda")]
-use core::arch::asm;
 
 const WARP: u32 = 32;
 
