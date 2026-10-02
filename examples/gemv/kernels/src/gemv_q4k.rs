@@ -151,8 +151,6 @@ pub unsafe fn gemv_q4k_fast(a: &[u8], x: &[f32], y: *mut f32, m: usize, k: usize
     }
 }
 
-
-
 /// Optimized Q4_K GEMV (v3): pair-of-sub-blocks loop + u32 scale reads + FMA.
 ///
 /// Three changes on top of [`gemv_q4k_fast`]:

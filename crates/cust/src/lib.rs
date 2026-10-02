@@ -55,15 +55,15 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+pub mod context;
 pub mod device;
 pub mod error;
 pub mod event;
 pub mod external;
 pub mod function;
-pub mod kernel;
-pub mod context;
 #[allow(warnings)]
 mod graph;
+pub mod kernel;
 pub mod link;
 pub mod memory;
 pub mod module;

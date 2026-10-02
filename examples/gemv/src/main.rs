@@ -312,11 +312,19 @@ fn run_mma_spike(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>>
 
     let kernel = mma_int8_tile::load(module)?;
     unsafe {
-        kernel.launch(1, 32, 0, stream, (
-            a_gpu.as_device_ptr(), a_gpu.len(),
-            b_gpu.as_device_ptr(), b_gpu.len(),
-            c_gpu.as_device_ptr(),
-        ))?;
+        kernel.launch(
+            1,
+            32,
+            0,
+            stream,
+            (
+                a_gpu.as_device_ptr(),
+                a_gpu.len(),
+                b_gpu.as_device_ptr(),
+                b_gpu.len(),
+                c_gpu.as_device_ptr(),
+            ),
+        )?;
     }
     stream.synchronize()?;
 
@@ -380,11 +388,22 @@ fn run_q4k_mmq(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
     let kernel = gemm_q4k_mmq_dp4a::load(module)?;
     let run = || -> Result<(), Box<dyn Error>> {
         unsafe {
-            kernel.launch(n as u32, 256, 0, stream, (
-                wq_gpu.as_device_ptr(), wq_gpu.len(),
-                x_gpu.as_device_ptr(), x_gpu.len(),
-                y_gpu.as_device_ptr(), n, mrows, k,
-            ))?;
+            kernel.launch(
+                n as u32,
+                256,
+                0,
+                stream,
+                (
+                    wq_gpu.as_device_ptr(),
+                    wq_gpu.len(),
+                    x_gpu.as_device_ptr(),
+                    x_gpu.len(),
+                    y_gpu.as_device_ptr(),
+                    n,
+                    mrows,
+                    k,
+                ),
+            )?;
         }
         Ok(())
     };
@@ -471,11 +490,21 @@ fn run_q4k_mma(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
     // Activation quant prologue (once); then time the gemm.
     let quant = || -> Result<(), Box<dyn Error>> {
         unsafe {
-            quant_kernel.launch(n as u32, 256, 0, stream, (
-                x_gpu.as_device_ptr(), x_gpu.len(),
-                xq_gpu.as_device_ptr(), xscale_gpu.as_device_ptr(), bsum_gpu.as_device_ptr(),
-                n, k,
-            ))?;
+            quant_kernel.launch(
+                n as u32,
+                256,
+                0,
+                stream,
+                (
+                    x_gpu.as_device_ptr(),
+                    x_gpu.len(),
+                    xq_gpu.as_device_ptr(),
+                    xscale_gpu.as_device_ptr(),
+                    bsum_gpu.as_device_ptr(),
+                    n,
+                    k,
+                ),
+            )?;
         }
         Ok(())
     };
@@ -485,13 +514,26 @@ fn run_q4k_mma(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> {
     let grid = ((n / 16) * (mrows / 8)) as u32;
     let gemm = || -> Result<(), Box<dyn Error>> {
         unsafe {
-            gemm_kernel.launch(grid, 32, 0, stream, (
-                wq_gpu.as_device_ptr(), wq_gpu.len(),
-                xq_gpu.as_device_ptr(), xq_gpu.len(),
-                xscale_gpu.as_device_ptr(), xscale_gpu.len(),
-                bsum_gpu.as_device_ptr(), bsum_gpu.len(),
-                y_gpu.as_device_ptr(), n, mrows, k,
-            ))?;
+            gemm_kernel.launch(
+                grid,
+                32,
+                0,
+                stream,
+                (
+                    wq_gpu.as_device_ptr(),
+                    wq_gpu.len(),
+                    xq_gpu.as_device_ptr(),
+                    xq_gpu.len(),
+                    xscale_gpu.as_device_ptr(),
+                    xscale_gpu.len(),
+                    bsum_gpu.as_device_ptr(),
+                    bsum_gpu.len(),
+                    y_gpu.as_device_ptr(),
+                    n,
+                    mrows,
+                    k,
+                ),
+            )?;
         }
         Ok(())
     };
@@ -631,11 +673,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             let block = 256u32;
             let grid = (m as u32).div_ceil(block);
             unsafe {
-                naive.launch(grid, block, 0, stream, (
-                    a_gpu.as_device_ptr(), a_gpu.len(),
-                    x_gpu.as_device_ptr(), x_gpu.len(),
-                    y_gpu.as_device_ptr(), m, k, alpha, beta,
-                ))?;
+                naive.launch(
+                    grid,
+                    block,
+                    0,
+                    stream,
+                    (
+                        a_gpu.as_device_ptr(),
+                        a_gpu.len(),
+                        x_gpu.as_device_ptr(),
+                        x_gpu.len(),
+                        y_gpu.as_device_ptr(),
+                        m,
+                        k,
+                        alpha,
+                        beta,
+                    ),
+                )?;
             }
             Ok(())
         };
@@ -654,11 +708,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             let block = 256u32; // must match BLOCK in the kernel
             let grid = m as u32; // one block per row
             unsafe {
-                block_k.launch(grid, block, 0, stream, (
-                    a_gpu.as_device_ptr(), a_gpu.len(),
-                    x_gpu.as_device_ptr(), x_gpu.len(),
-                    y_gpu.as_device_ptr(), m, k, alpha, beta,
-                ))?;
+                block_k.launch(
+                    grid,
+                    block,
+                    0,
+                    stream,
+                    (
+                        a_gpu.as_device_ptr(),
+                        a_gpu.len(),
+                        x_gpu.as_device_ptr(),
+                        x_gpu.len(),
+                        y_gpu.as_device_ptr(),
+                        m,
+                        k,
+                        alpha,
+                        beta,
+                    ),
+                )?;
             }
             Ok(())
         };
@@ -678,11 +744,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             let warps_per_block = block / 32;
             let grid = (m as u32).div_ceil(warps_per_block);
             unsafe {
-                warp.launch(grid, block, 0, stream, (
-                    a_gpu.as_device_ptr(), a_gpu.len(),
-                    x_gpu.as_device_ptr(), x_gpu.len(),
-                    y_gpu.as_device_ptr(), m, k, alpha, beta,
-                ))?;
+                warp.launch(
+                    grid,
+                    block,
+                    0,
+                    stream,
+                    (
+                        a_gpu.as_device_ptr(),
+                        a_gpu.len(),
+                        x_gpu.as_device_ptr(),
+                        x_gpu.len(),
+                        y_gpu.as_device_ptr(),
+                        m,
+                        k,
+                        alpha,
+                        beta,
+                    ),
+                )?;
             }
             Ok(())
         };
@@ -774,11 +852,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let block = 256u32; // 8 warps/block
                 let grid = (m as u32).div_ceil(block / 32);
                 unsafe {
-                    kload.launch(grid, block, 0, stream, (
-                        a16_gpu.as_device_ptr(), a16_gpu.len(),
-                        x_gpu.as_device_ptr(), x_gpu.len(),
-                        y_gpu.as_device_ptr(), m, k, alpha, beta,
-                    ))?;
+                    kload.launch(
+                        grid,
+                        block,
+                        0,
+                        stream,
+                        (
+                            a16_gpu.as_device_ptr(),
+                            a16_gpu.len(),
+                            x_gpu.as_device_ptr(),
+                            x_gpu.len(),
+                            y_gpu.as_device_ptr(),
+                            m,
+                            k,
+                            alpha,
+                            beta,
+                        ),
+                    )?;
                 }
                 Ok(())
             };
@@ -837,12 +927,24 @@ fn main() -> Result<(), Box<dyn Error>> {
             let block = 256u32;
             let grid = (m as u32).div_ceil(block / 32);
             unsafe {
-                i8w.launch(grid, block, 0, stream, (
-                    aq_gpu.as_device_ptr(), aq_gpu.len(),
-                    sa_gpu.as_device_ptr(), sa_gpu.len(),
-                    x_gpu.as_device_ptr(), x_gpu.len(),
-                    y_gpu.as_device_ptr(), m, k, beta,
-                ))?;
+                i8w.launch(
+                    grid,
+                    block,
+                    0,
+                    stream,
+                    (
+                        aq_gpu.as_device_ptr(),
+                        aq_gpu.len(),
+                        sa_gpu.as_device_ptr(),
+                        sa_gpu.len(),
+                        x_gpu.as_device_ptr(),
+                        x_gpu.len(),
+                        y_gpu.as_device_ptr(),
+                        m,
+                        k,
+                        beta,
+                    ),
+                )?;
             }
             Ok(())
         };
@@ -861,12 +963,25 @@ fn main() -> Result<(), Box<dyn Error>> {
             let block = 256u32;
             let grid = (m as u32).div_ceil(block / 32);
             unsafe {
-                i8d.launch(grid, block, 0, stream, (
-                    aq_gpu.as_device_ptr(), aq_gpu.len(),
-                    sa_gpu.as_device_ptr(), sa_gpu.len(),
-                    xq_gpu.as_device_ptr(), xq_gpu.len(),
-                    sx, y_gpu.as_device_ptr(), m, k, beta,
-                ))?;
+                i8d.launch(
+                    grid,
+                    block,
+                    0,
+                    stream,
+                    (
+                        aq_gpu.as_device_ptr(),
+                        aq_gpu.len(),
+                        sa_gpu.as_device_ptr(),
+                        sa_gpu.len(),
+                        xq_gpu.as_device_ptr(),
+                        xq_gpu.len(),
+                        sx,
+                        y_gpu.as_device_ptr(),
+                        m,
+                        k,
+                        beta,
+                    ),
+                )?;
             }
             Ok(())
         };
@@ -915,12 +1030,25 @@ fn main() -> Result<(), Box<dyn Error>> {
             let block = 256u32;
             let grid = (m as u32).div_ceil(block / 32);
             unsafe {
-                tk.launch(grid, block, 0, stream, (
-                    wt_gpu.as_device_ptr(), wt_gpu.len(),
-                    sw_gpu.as_device_ptr(), sw_gpu.len(),
-                    xq_gpu.as_device_ptr(), xq_gpu.len(),
-                    sx, y_gpu.as_device_ptr(), m, k, beta,
-                ))?;
+                tk.launch(
+                    grid,
+                    block,
+                    0,
+                    stream,
+                    (
+                        wt_gpu.as_device_ptr(),
+                        wt_gpu.len(),
+                        sw_gpu.as_device_ptr(),
+                        sw_gpu.len(),
+                        xq_gpu.as_device_ptr(),
+                        xq_gpu.len(),
+                        sx,
+                        y_gpu.as_device_ptr(),
+                        m,
+                        k,
+                        beta,
+                    ),
+                )?;
             }
             Ok(())
         };
@@ -940,12 +1068,26 @@ fn main() -> Result<(), Box<dyn Error>> {
             let block = 256u32;
             let grid = (m as u32).div_ceil(block / 32);
             unsafe {
-                tkd.launch(grid, block, 0, stream, (
-                    wt_gpu.as_device_ptr(), wt_gpu.len(),
-                    sw_gpu.as_device_ptr(), sw_gpu.len(),
-                    xq_gpu.as_device_ptr(), xq_gpu.len(),
-                    sx, x_sum, y_gpu.as_device_ptr(), m, k, beta,
-                ))?;
+                tkd.launch(
+                    grid,
+                    block,
+                    0,
+                    stream,
+                    (
+                        wt_gpu.as_device_ptr(),
+                        wt_gpu.len(),
+                        sw_gpu.as_device_ptr(),
+                        sw_gpu.len(),
+                        xq_gpu.as_device_ptr(),
+                        xq_gpu.len(),
+                        sx,
+                        x_sum,
+                        y_gpu.as_device_ptr(),
+                        m,
+                        k,
+                        beta,
+                    ),
+                )?;
             }
             Ok(())
         };
@@ -979,11 +1121,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let block = 256u32;
                 let grid = (m as u32).div_ceil(block / 32);
                 unsafe {
-                    q4k.launch(grid, block, 0, stream, (
-                        q4k_gpu.as_device_ptr(), q4k_gpu.len(),
-                        x_gpu.as_device_ptr(), x_gpu.len(),
-                        y_gpu.as_device_ptr(), m, k, beta,
-                    ))?;
+                    q4k.launch(
+                        grid,
+                        block,
+                        0,
+                        stream,
+                        (
+                            q4k_gpu.as_device_ptr(),
+                            q4k_gpu.len(),
+                            x_gpu.as_device_ptr(),
+                            x_gpu.len(),
+                            y_gpu.as_device_ptr(),
+                            m,
+                            k,
+                            beta,
+                        ),
+                    )?;
                 }
                 Ok(())
             };
@@ -1002,11 +1155,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let block = 256u32;
                 let grid = (m as u32).div_ceil(block / 32);
                 unsafe {
-                    q4kf.launch(grid, block, 0, stream, (
-                        q4k_gpu.as_device_ptr(), q4k_gpu.len(),
-                        x_gpu.as_device_ptr(), x_gpu.len(),
-                        y_gpu.as_device_ptr(), m, k, beta,
-                    ))?;
+                    q4kf.launch(
+                        grid,
+                        block,
+                        0,
+                        stream,
+                        (
+                            q4k_gpu.as_device_ptr(),
+                            q4k_gpu.len(),
+                            x_gpu.as_device_ptr(),
+                            x_gpu.len(),
+                            y_gpu.as_device_ptr(),
+                            m,
+                            k,
+                            beta,
+                        ),
+                    )?;
                 }
                 Ok(())
             };
@@ -1025,11 +1189,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let block = 256u32;
                 let grid = (m as u32).div_ceil(block / 32);
                 unsafe {
-                    q4kv3.launch(grid, block, 0, stream, (
-                        q4k_gpu.as_device_ptr(), q4k_gpu.len(),
-                        x_gpu.as_device_ptr(), x_gpu.len(),
-                        y_gpu.as_device_ptr(), m, k, beta,
-                    ))?;
+                    q4kv3.launch(
+                        grid,
+                        block,
+                        0,
+                        stream,
+                        (
+                            q4k_gpu.as_device_ptr(),
+                            q4k_gpu.len(),
+                            x_gpu.as_device_ptr(),
+                            x_gpu.len(),
+                            y_gpu.as_device_ptr(),
+                            m,
+                            k,
+                            beta,
+                        ),
+                    )?;
                 }
                 Ok(())
             };
@@ -1048,11 +1223,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let block = 256u32;
                 let grid = (m as u32).div_ceil(block / 32);
                 unsafe {
-                    q4kv4.launch(grid, block, 0, stream, (
-                        q4k_gpu.as_device_ptr(), q4k_gpu.len(),
-                        x_gpu.as_device_ptr(), x_gpu.len(),
-                        y_gpu.as_device_ptr(), m, k, beta,
-                    ))?;
+                    q4kv4.launch(
+                        grid,
+                        block,
+                        0,
+                        stream,
+                        (
+                            q4k_gpu.as_device_ptr(),
+                            q4k_gpu.len(),
+                            x_gpu.as_device_ptr(),
+                            x_gpu.len(),
+                            y_gpu.as_device_ptr(),
+                            m,
+                            k,
+                            beta,
+                        ),
+                    )?;
                 }
                 Ok(())
             };
@@ -1071,11 +1257,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let block = 256u32;
                 let grid = (m as u32).div_ceil(block / 32);
                 unsafe {
-                    q4kv.launch(grid, block, 0, stream, (
-                        q4k_gpu.as_device_ptr(), q4k_gpu.len(),
-                        xq_gpu.as_device_ptr(), xq_gpu.len(),
-                        sx, y_gpu.as_device_ptr(), m, k, beta,
-                    ))?;
+                    q4kv.launch(
+                        grid,
+                        block,
+                        0,
+                        stream,
+                        (
+                            q4k_gpu.as_device_ptr(),
+                            q4k_gpu.len(),
+                            xq_gpu.as_device_ptr(),
+                            xq_gpu.len(),
+                            sx,
+                            y_gpu.as_device_ptr(),
+                            m,
+                            k,
+                            beta,
+                        ),
+                    )?;
                 }
                 Ok(())
             };
@@ -1103,11 +1301,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let block = 256u32;
                 let grid = (m as u32).div_ceil(block / 32);
                 unsafe {
-                    q6k.launch(grid, block, 0, stream, (
-                        q6k_gpu.as_device_ptr(), q6k_gpu.len(),
-                        x_gpu.as_device_ptr(), x_gpu.len(),
-                        y_gpu.as_device_ptr(), m, k, beta,
-                    ))?;
+                    q6k.launch(
+                        grid,
+                        block,
+                        0,
+                        stream,
+                        (
+                            q6k_gpu.as_device_ptr(),
+                            q6k_gpu.len(),
+                            x_gpu.as_device_ptr(),
+                            x_gpu.len(),
+                            y_gpu.as_device_ptr(),
+                            m,
+                            k,
+                            beta,
+                        ),
+                    )?;
                 }
                 Ok(())
             };
@@ -1126,11 +1335,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let block = 256u32;
                 let grid = (m as u32).div_ceil(block / 32);
                 unsafe {
-                    q6kf.launch(grid, block, 0, stream, (
-                        q6k_gpu.as_device_ptr(), q6k_gpu.len(),
-                        x_gpu.as_device_ptr(), x_gpu.len(),
-                        y_gpu.as_device_ptr(), m, k, beta,
-                    ))?;
+                    q6kf.launch(
+                        grid,
+                        block,
+                        0,
+                        stream,
+                        (
+                            q6k_gpu.as_device_ptr(),
+                            q6k_gpu.len(),
+                            x_gpu.as_device_ptr(),
+                            x_gpu.len(),
+                            y_gpu.as_device_ptr(),
+                            m,
+                            k,
+                            beta,
+                        ),
+                    )?;
                 }
                 Ok(())
             };
@@ -1149,11 +1369,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let block = 256u32;
                 let grid = (m as u32).div_ceil(block / 32);
                 unsafe {
-                    q6kd.launch(grid, block, 0, stream, (
-                        q6k_gpu.as_device_ptr(), q6k_gpu.len(),
-                        xq_gpu.as_device_ptr(), xq_gpu.len(),
-                        sx, y_gpu.as_device_ptr(), m, k, beta,
-                    ))?;
+                    q6kd.launch(
+                        grid,
+                        block,
+                        0,
+                        stream,
+                        (
+                            q6k_gpu.as_device_ptr(),
+                            q6k_gpu.len(),
+                            xq_gpu.as_device_ptr(),
+                            xq_gpu.len(),
+                            sx,
+                            y_gpu.as_device_ptr(),
+                            m,
+                            k,
+                            beta,
+                        ),
+                    )?;
                 }
                 Ok(())
             };
@@ -1172,11 +1404,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let block = 256u32;
                 let grid = (m as u32).div_ceil(block / 32);
                 unsafe {
-                    q6kv.launch(grid, block, 0, stream, (
-                        q6k_gpu.as_device_ptr(), q6k_gpu.len(),
-                        xq_gpu.as_device_ptr(), xq_gpu.len(),
-                        sx, y_gpu.as_device_ptr(), m, k, beta,
-                    ))?;
+                    q6kv.launch(
+                        grid,
+                        block,
+                        0,
+                        stream,
+                        (
+                            q6k_gpu.as_device_ptr(),
+                            q6k_gpu.len(),
+                            xq_gpu.as_device_ptr(),
+                            xq_gpu.len(),
+                            sx,
+                            y_gpu.as_device_ptr(),
+                            m,
+                            k,
+                            beta,
+                        ),
+                    )?;
                 }
                 Ok(())
             };

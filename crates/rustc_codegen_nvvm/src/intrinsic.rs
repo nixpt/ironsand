@@ -1,4 +1,3 @@
-
 use rustc_abi as abi;
 use rustc_abi::{self, BackendRepr, Float, HasDataLayout, Primitive, WrappingRange};
 use rustc_codegen_ssa::errors::InvalidMonomorphization;
@@ -242,7 +241,6 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
         result: PlaceRef<'tcx, &'ll Value>,
         span: Span,
     ) -> Result<(), ty::Instance<'tcx>> {
-
         let tcx = self.tcx;
         let callee_ty = instance.ty(tcx, self.typing_env());
 
@@ -927,7 +925,4 @@ impl<'ll, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
         trace!("Generate va_end `{:?}`", va_list);
         self.call_intrinsic("llvm.va.end", &[va_list])
     }
-
-
-
 }

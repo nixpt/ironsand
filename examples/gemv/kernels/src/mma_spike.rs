@@ -11,10 +11,10 @@
 //!   B: 2 regs — n=groupID; k = lane2·4 (+16)
 //!   C/D: 4 s32 regs — c0,c1 row=groupID col=lane2·2+{0,1}; c2,c3 row=groupID+8
 
-use cuda_std::kernel;
-use cuda_std::thread;
 #[cfg(target_os = "cuda")]
 use core::arch::asm;
+use cuda_std::kernel;
+use cuda_std::thread;
 
 #[cfg(target_os = "cuda")]
 #[inline(always)]

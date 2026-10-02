@@ -124,42 +124,7 @@ Measures latency on your GPU.
 
 ---
 
-## Integration with Haiku-San
-
-Each kernel is dispatched by opcode:
-
-```rust
-use haiku_san::HaikuSan;
-use role_kernels_decode::{OP_RMSNORM_SINGLE, OP_GEMV_DECODE_SINGLE};
-
-let mut orchestrator = HaikuSan::new();
-
-// Submit RMS norm kernel
-let task1 = orchestrator.submit_task(
-    "RmsNorm",
-    OP_RMSNORM_SINGLE,
-    1,           // single row
-    hidden_dim,  // hidden dimension
-);
-
-// Submit GEMV kernel
-let task2 = orchestrator.submit_task(
-    "GEMV_Decode",
-    OP_GEMV_DECODE_SINGLE,
-    hidden_dim,  // output rows
-    hidden_dim,  // input cols
-);
-
-// Declare dependency: task2 waits for task1
-orchestrator.add_dependency(task2, task1);
-
-// Launch all async
-orchestrator.launch_all_async(&stream)?;
-```
-
----
-
-## Opcodes (Haiku-San Dispatcher)
+## Opcodes
 
 ```rust
 const OP_RMSNORM_SINGLE: u32 = 30;
@@ -167,9 +132,7 @@ const OP_GEMV_DECODE_SINGLE: u32 = 31;
 const OP_FLASH_ATTN_SINGLE: u32 = 32;
 ```
 
-When Haiku-San sees opcode 30, it calls the RMS norm kernel.
-When it sees opcode 31, it calls the GEMV kernel.
-Etc.
+An orchestrator dispatches each kernel by opcode (30 = RMS norm, 31 = GEMV, 32 = flash attention).
 
 ---
 
@@ -216,16 +179,6 @@ Speedup:                          20%
 
 ---
 
-## Design Documents
-
-See `doc/ROLE_KERNELS_DESIGN.md` for:
-- Why decode kernels differ from prefill
-- Register pressure analysis
-- Memory bandwidth utilization
-- Scaling to longer caches
-
----
-
 ## Files
 
 ### Device Code (GPU)
@@ -237,18 +190,7 @@ See `doc/ROLE_KERNELS_DESIGN.md` for:
 
 ### Build
 - `build.rs` — Compiles kernels to PTX
-- `Cargo.toml` — Dependencies (cust, haiku_san, cuda_std)
-
----
-
-## Next Steps
-
-1. **Week 1, Days 1-3**: Implement + test RoleRMSNormSingle ← **YOU ARE HERE**
-2. **Week 1, Days 4-5**: Implement + test RoleGEMVDecodeSingle
-3. **Week 1, Days 6-7**: Implement + test RoleFlashAttnSingle
-4. **Week 2**: Integrate all three into Haiku-San
-5. **Week 3**: Wire into zorro decode loop
-6. **Week 4**: Measure 20% decode speedup
+- `Cargo.toml` — Dependencies (cust, cuda_std)
 
 ---
 

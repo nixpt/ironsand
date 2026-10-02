@@ -160,7 +160,6 @@ version = "0.1.0"
 dependencies = [
  "cuda_builder",
  "cust",
- "haiku_san",
  "half",
  "log",
  "ndarray",
@@ -876,15 +875,6 @@ dependencies = [
  "cuda_std",
  "cust_core",
  "rand_core 0.9.5",
-]
-
-[[package]]
-name = "haiku_san"
-version = "0.1.0"
-dependencies = [
- "cust",
- "log",
- "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -1761,7 +1751,6 @@ version = "0.1.0"
 dependencies = [
  "cuda_builder",
  "cust",
- "haiku_san",
  "log",
  "ndarray",
  "ndarray-rand",

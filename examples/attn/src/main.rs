@@ -1,4 +1,4 @@
-//! Attention kernel tests: f16 mma.sync + FlashAttention-2 + Stream kernel + Haiku-San orchestrator.
+//! Attention kernel tests: f16 mma.sync + FlashAttention-2 + Stream kernel.
 
 use std::error::Error;
 
@@ -9,7 +9,6 @@ use cust::memory::{CopyDestination as _, DeviceBuffer, DevicePointer};
 use cust::module::Module;
 use cust::stream::{Stream, StreamFlags};
 use cust::util::SliceExt as _;
-use haiku_san::HaikuSan;
 use half::f16;
 use ndarray::Array2;
 use ndarray_rand::RandomExt as _;
@@ -52,7 +51,6 @@ kernel_descriptor! {
         num_query_heads: usize, num_kv_heads: usize,
     );
 }
-
 
 fn time<F: FnMut() -> Result<(), Box<dyn Error>>>(
     stream: &Stream,
@@ -115,11 +113,19 @@ fn run_mma_f16_spike(module: &Module, stream: &Stream) -> Result<(), Box<dyn Err
 
     let mma_f16_tile = mma_f16_tile::load(&module)?;
     unsafe {
-        mma_f16_tile.launch(1, 32, 0, stream, (
-            a_gpu.as_device_ptr(), a_gpu.len(),
-            b_gpu.as_device_ptr(), b_gpu.len(),
-            c_gpu.as_device_ptr(),
-        ))?;
+        mma_f16_tile.launch(
+            1,
+            32,
+            0,
+            stream,
+            (
+                a_gpu.as_device_ptr(),
+                a_gpu.len(),
+                b_gpu.as_device_ptr(),
+                b_gpu.len(),
+                c_gpu.as_device_ptr(),
+            ),
+        )?;
     }
     stream.synchronize()?;
 
@@ -270,13 +276,25 @@ fn run_flash_attn_shape(
     let kv_head_stride = s_seq * DH;
     let run = || -> Result<(), Box<dyn Error>> {
         unsafe {
-            flash_attn.launch((grid_x, grid_y), BLOCK, 0, stream, (
-                q_gpu.as_device_ptr(), q_gpu.len(),
-                k_gpu.as_device_ptr(), k_gpu.len(),
-                v_gpu.as_device_ptr(), v_gpu.len(),
-                o_gpu.as_device_ptr(),
-                l_seq, s_seq, q_head_stride, kv_head_stride,
-            ))?;
+            flash_attn.launch(
+                (grid_x, grid_y),
+                BLOCK,
+                0,
+                stream,
+                (
+                    q_gpu.as_device_ptr(),
+                    q_gpu.len(),
+                    k_gpu.as_device_ptr(),
+                    k_gpu.len(),
+                    v_gpu.as_device_ptr(),
+                    v_gpu.len(),
+                    o_gpu.as_device_ptr(),
+                    l_seq,
+                    s_seq,
+                    q_head_stride,
+                    kv_head_stride,
+                ),
+            )?;
         }
         Ok(())
     };
@@ -421,15 +439,25 @@ fn run_flash_attn_gqa(module: &Module, stream: &Stream) -> Result<(), Box<dyn Er
     const BLOCK: u32 = 128;
 
     unsafe {
-        flash_attn_gqa.launch((grid_x, grid_y), BLOCK, 0, stream, (
-            q_gpu.as_device_ptr(), q_gpu.len(),
-            k_gpu.as_device_ptr(), k_gpu.len(),
-            v_gpu.as_device_ptr(), v_gpu.len(),
-            o_gpu.as_device_ptr(),
-            l_seq, s_seq,
-            num_query_heads,
-            num_kv_heads,
-        ))?;
+        flash_attn_gqa.launch(
+            (grid_x, grid_y),
+            BLOCK,
+            0,
+            stream,
+            (
+                q_gpu.as_device_ptr(),
+                q_gpu.len(),
+                k_gpu.as_device_ptr(),
+                k_gpu.len(),
+                v_gpu.as_device_ptr(),
+                v_gpu.len(),
+                o_gpu.as_device_ptr(),
+                l_seq,
+                s_seq,
+                num_query_heads,
+                num_kv_heads,
+            ),
+        )?;
     }
     stream.synchronize()?;
 
@@ -528,15 +556,25 @@ fn run_mqa_test(module: &Module, stream: &Stream) -> Result<(), Box<dyn Error>> 
     const BLOCK: u32 = 128;
 
     unsafe {
-        flash_attn_gqa.launch((grid_x, grid_y), BLOCK, 0, stream, (
-            q_gpu.as_device_ptr(), q_gpu.len(),
-            k_gpu.as_device_ptr(), k_gpu.len(),
-            v_gpu.as_device_ptr(), v_gpu.len(),
-            o_gpu.as_device_ptr(),
-            l_seq, s_seq,
-            num_query_heads,
-            num_kv_heads,
-        ))?;
+        flash_attn_gqa.launch(
+            (grid_x, grid_y),
+            BLOCK,
+            0,
+            stream,
+            (
+                q_gpu.as_device_ptr(),
+                q_gpu.len(),
+                k_gpu.as_device_ptr(),
+                k_gpu.len(),
+                v_gpu.as_device_ptr(),
+                v_gpu.len(),
+                o_gpu.as_device_ptr(),
+                l_seq,
+                s_seq,
+                num_query_heads,
+                num_kv_heads,
+            ),
+        )?;
     }
     stream.synchronize()?;
 
@@ -599,40 +637,6 @@ fn run_stream_kernel_spike(module: &Module, _stream: &Stream) -> Result<(), Box<
     Ok(())
 }
 
-// ── Haiku-San Orchestrator Spike ────────────────────────────────────────────
-
-fn run_haiku_san_spike(stream: &Stream) -> Result<(), Box<dyn Error>> {
-    use haiku_san::HaikuSan;
-
-    println!("=== Haiku-San: CPU/GPU Orchestrator (4 spikes) ===");
-
-    // Spike 1: Simple 2-op chain (GEMV_Q4K → SiLU)
-    let mut orchestrator = HaikuSan::new();
-    orchestrator.orchestrate_two_op_spike(stream)?;
-
-    // Spike 2: Full-layer chain (RmsNorm → QKV → FFNGateUp → SiLU)
-    let mut orchestrator = HaikuSan::new();
-    orchestrator.orchestrate_layer_spike(stream)?;
-
-    // Spike 3: Hybrid architecture — single layer with stream blocks
-    let mut orchestrator = HaikuSan::new();
-    orchestrator.orchestrate_hybrid_layer_spike(stream, 0)?;
-
-    // Spike 4: Full model — multiple layers with stream blocks
-    let mut orchestrator = HaikuSan::new();
-    orchestrator.orchestrate_full_model_spike(stream, 32)?; // Llama-1B: 32 layers
-
-    println!("\nHAIKU-SAN [SUMMARY]");
-    println!("  Architecture: CPU orchestrates async GPU kernels");
-    println!("  Hybrid approach: Layer-level (Haiku) + Sub-layer (Stream)");
-    println!("  Per-token kernels: 2 × 32 = 64 (vs. 320 per-op)");
-    println!("  CPU/GPU parallelism: Concurrent execution (not lockstep)");
-    println!("  Capacity: 64-128 kernels/token safe (GPU event + overhead limits)");
-    println!("  Estimated speedup: 2-3× over per-kernel chain");
-
-    Ok(())
-}
-
 // ── Performance characterization (summary) ──────────────────────────────────
 
 fn run_perf_summary() {
@@ -668,9 +672,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("\n=== Stream kernel spike (4-op persistent queue) ===");
     run_stream_kernel_spike(&module, &stream)?;
-
-    println!("\n=== Haiku-San orchestrator (CPU/GPU hybrid) ===");
-    run_haiku_san_spike(&stream)?;
 
     println!();
     run_perf_summary();

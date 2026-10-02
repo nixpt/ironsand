@@ -4,20 +4,15 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-description = "Decode-phase optimized GPU kernels for Haiku-San orchestrator"
+description = "Decode-phase optimized GPU kernels"
 
 [dependencies]
 cust = { path = "../cust", default-features = false, features = ["impl_half"] }
-haiku_san = { path = "../../../haiku-san" }
 log = "0.4"
 
 [dev-dependencies]
 ndarray = "0.16"
 ndarray-rand = "0.15"
-
-[[example]]
-name = "role_kernels_decode_demo"
-path = "examples/demo.rs"
 
 [build-dependencies]
 cuda_builder = { workspace = true, default-features = false, features = ["rustc_codegen_nvvm", "llvm19"] }

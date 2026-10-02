@@ -15,10 +15,10 @@
 //!     d0: (groupID, lane2*2)   d1: (groupID, lane2*2+1)
 //!     d2: (groupID+8, lane2*2) d3: (groupID+8, lane2*2+1)
 
-use cuda_std::kernel;
-use cuda_std::thread;
 #[cfg(target_os = "cuda")]
 use core::arch::asm;
+use cuda_std::kernel;
+use cuda_std::thread;
 
 /// Load 2 packed f16 values from a u16 slice starting at `idx` (u16 index).
 #[cfg(target_os = "cuda")]
@@ -77,7 +77,7 @@ pub unsafe fn mma_f16_tile(a: &[u16], b: &[u16], c: *mut f32) {
 
     let lane = thread::thread_idx_x() as usize;
     let grp = lane / 4; // groupID 0..7
-    let l2 = lane % 4;  // threadID-in-group 0..3
+    let l2 = lane % 4; // threadID-in-group 0..3
     let ap = a.as_ptr();
     let bp = b.as_ptr();
 

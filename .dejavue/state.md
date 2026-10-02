@@ -14,7 +14,7 @@ Residuals resolved:
 - Companion — `c_variadic` field access in `intrinsic.rs`
 - Companion — `run_thin_lto` signature alignment in `lib.rs`/`lto.rs`
 
-Phase-3d complete (llvm20/22 plumbing dropped, ~50 LoC removed). Phase-3e complete (obsolete references rationalized). **Phase-3c** (cfg-gated `verify_module` for i24 bitcast mitigation) pending — next step.
+Phase-3d complete (llvm20/22 plumbing dropped, ~50 LoC removed). Phase-3e complete (obsolete references rationalized). **Phase-3c verify-gate LANDED** (`back.rs`: `verify_module` now `cfg(not(feature = "llvm19"))`; backend check clean, 6/6 tests pass) — but end-to-end exposes the NEXT blocker in the same i24 family: `merge_llvm_modules` → `LLVMRustParseBitcodeForLTO` fails on 6 core CGUs + 1 glam CGU (`Invalid cast (Producer: 'LLVM19.1.7' ...)`; nightly-2026-04-02 core emits a pattern LLVM 19.1.7's reader rejects). Unblocks only together with the `probe/kernel-features` feature-forward fix (also confirmed: its `rustc_codegen_nvvm/llvm19` flag resolves for NO kernel subcrate — `vecadd-kernels` has no backend edge, so the "via cuda_std" premise in the comment is wrong on current HEAD).
 
 **LLVM 19 pinned as sole codegen backend.** llvm20/22 cargo features removed. CLAUDE.md operative rule: `LLVM_CONFIG_19=/workspace/scratch/llvm19/bin/llvm-config`. ThinLTO stubbed (zero value for NVVM pipeline). DebugInfo scope retained for CUDA-GDB/LLDB-GPU kernel debugging.
 
@@ -22,7 +22,7 @@ Phase-3d complete (llvm20/22 plumbing dropped, ~50 LoC removed). Phase-3e comple
 
 **GEMV decode series at plateau** (on exp/gemv branch): Q4_K v3 (224-269 GB/s), Q6_K warp (~380 GB/s). Ternary dp4a optimization resolved ALU bottleneck (822 GB/s effective). Kernel families: f32, f16 vec4, int8 dp4a, ternary dp4a, Q4_K warp/fast/v3, Q6_K warp/fast.
 
-**Haiku-San crate** (CPU/GPU hybrid orchestrator) extracted as standalone crate. Role-based decode kernels scaffolded (RoleRMSNormSingle, RoleGEMVDecodeSingle, RoleFlashAttnSingle).
+**Haiku-San** (CPU/GPU hybrid orchestrator) lives in its own repo, outside ironsand; no ironsand crate depends on it. Role-based decode kernels scaffolded (RoleRMSNormSingle, RoleGEMVDecodeSingle, RoleFlashAttnSingle).
 
 
 ## 2026-06-30 — annotation

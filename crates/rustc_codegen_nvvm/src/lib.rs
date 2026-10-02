@@ -181,10 +181,10 @@ impl CodegenBackend for NvvmCodegenBackend {
         tcx: TyCtxt<'tcx>,
         crate_info: &CrateInfo,
     ) -> Box<dyn std::any::Any> {
-    debug!("Codegen crate");
-    Box::new(rustc_codegen_ssa::base::codegen_crate(
-        Self, tcx, crate_info,
-    ))
+        debug!("Codegen crate");
+        Box::new(rustc_codegen_ssa::base::codegen_crate(
+            Self, tcx, crate_info,
+        ))
     }
 
     fn join_codegen(

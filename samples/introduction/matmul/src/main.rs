@@ -66,8 +66,7 @@ fn matrix_multiply(
         );
     }
 
-    let matrix_mul_cuda = matrix_mul_cuda::load(&module)
-        .expect("Kernel function not found!");
+    let matrix_mul_cuda = matrix_mul_cuda::load(&module).expect("Kernel function not found!");
 
     unsafe {
         // The function definition of the kernel is:
@@ -77,7 +76,10 @@ fn matrix_multiply(
         // For elements that have the type `*mut T` or `*const T`, we'll need to pass only the device pointer.
         // For elements that have the type `&[T]`, we must pass the device pointer as well as the length of the slice.
         matrix_mul_cuda.launch(
-            grid, threads, 0, &stream,
+            grid,
+            threads,
+            0,
+            &stream,
             (
                 d_c.as_device_ptr(),
                 d_a.as_device_ptr(),
@@ -102,7 +104,10 @@ fn matrix_multiply(
     for _ in 0..N_ITER {
         unsafe {
             matrix_mul_cuda.launch(
-                grid, threads, 0, &stream,
+                grid,
+                threads,
+                0,
+                &stream,
                 (
                     d_c.as_device_ptr(),
                     d_a.as_device_ptr(),
