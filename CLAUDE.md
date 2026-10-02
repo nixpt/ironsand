@@ -51,7 +51,7 @@ Fallback if not on PATH: `python3 .dejavue/dejavue context`
   `samples/introduction/matmul`, `samples/introduction/async_api`
   (host async stream/event overlap reference).
 - Decode roles: `crates/role_kernels_decode` (RoleRMSNormSingle,
-  RoleGEMVDecodeSingle, RoleFlashAttnSingle + Haiku-San orchestrator).
+  RoleGEMVDecodeSingle, RoleFlashAttnSingle).
 - `tests/compiletests` = codegen test harness; `xtask` = build tooling.
 
 ## Memory

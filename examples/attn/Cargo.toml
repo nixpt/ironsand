@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 cust = { path = "../../crates/cust", features = ["impl_half"] }
-haiku_san = { path = "../../../haiku-san" }
 ndarray = { version = "0.16" }
 ndarray-rand = "0.15.0"
 half = "2.4.1"

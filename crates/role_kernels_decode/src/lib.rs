@@ -17,28 +17,14 @@
 //! - **RoleGEMVDecodeSingle**: <500 μs, thin matrix-vector product (8192→8192)
 //! - **RoleFlashAttnSingle**: <2000 μs, single-query attention with cached K/V (1024-token cache)
 //!
-//! ## Integration with Haiku-San
+//! ## Opcodes
 //!
-//! Each kernel is submitted to Haiku-San via an opcode:
+//! Each kernel is identified by an opcode for dispatch by a host-side orchestrator:
 //! ```ignore
 //! const OP_RMSNORM_SINGLE: u32 = 30;
 //! const OP_GEMV_DECODE_SINGLE: u32 = 31;
 //! const OP_FLASH_ATTN_SINGLE: u32 = 32;
-//!
-//! let mut orchestrator = HaikuSan::new();
-//! let task1 = orchestrator.submit_task("RmsNorm", OP_RMSNORM_SINGLE, 1, hidden_dim);
-//! let task2 = orchestrator.submit_task("GEMV", OP_GEMV_DECODE_SINGLE, hidden_dim, hidden_dim);
-//! orchestrator.add_dependency(task2, task1);
-//! orchestrator.launch_all_async(&stream)?;
 //! ```
-//!
-//! ## Design Files
-//!
-//! See `doc/ROLE_KERNELS_DESIGN.md` for:
-//! - Phase-aware specialization rationale
-//! - Register pressure analysis
-//! - Memory coalescing patterns
-//! - Expected performance gains
 
 use cust::kernel::KernelDescriptor;
 use cust::kernel_descriptor;

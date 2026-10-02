@@ -44,7 +44,7 @@ dcp: DCP/1.0
   `samples/introduction/matmul`, `samples/introduction/async_api`
   (host async stream/event overlap reference).
 - Decode roles: `crates/role_kernels_decode` (RoleRMSNormSingle,
-  RoleGEMVDecodeSingle, RoleFlashAttnSingle + Haiku-San orchestrator).
+  RoleGEMVDecodeSingle, RoleFlashAttnSingle).
 - `tests/compiletests` = codegen test harness; `xtask` = build tooling.
 
 ## Memory

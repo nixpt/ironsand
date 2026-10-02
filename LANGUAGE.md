@@ -2,7 +2,7 @@
 
 > Version: 0.1.0-draft  
 > Scope: Consumer-facing API surface for downstream projects (zorro, zazen, and others).  
-> haiku_san is out of scope — it is a zorro feature branch.
+> haiku_san (the CPU/GPU orchestrator) lives outside ironsand and is out of scope.
 
 This document defines the **ironsand language**: the vocabulary, contracts, and idioms that downstream consumers use to author GPU kernels in Rust and execute them via CUDA.
 

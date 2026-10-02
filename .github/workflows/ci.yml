@@ -44,7 +44,6 @@ jobs:
 
       - name: Clippy — host-only crates
         run: |
-          cargo clippy -p haiku_san --all-targets -- -D warnings
           cargo clippy -p cust_core --all-targets -- -D warnings
           cargo clippy -p cust_derive --all-targets -- -D warnings
           cargo clippy -p ptx --all-targets -- -D warnings
@@ -69,7 +68,6 @@ jobs:
 
       - name: Test — host-only crates
         run: |
-          cargo test -p haiku_san
           cargo test -p cust_core
           cargo test -p cust_derive
 

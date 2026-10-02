@@ -22,7 +22,7 @@ Phase-3d complete (llvm20/22 plumbing dropped, ~50 LoC removed). Phase-3e comple
 
 **GEMV decode series at plateau** (on exp/gemv branch): Q4_K v3 (224-269 GB/s), Q6_K warp (~380 GB/s). Ternary dp4a optimization resolved ALU bottleneck (822 GB/s effective). Kernel families: f32, f16 vec4, int8 dp4a, ternary dp4a, Q4_K warp/fast/v3, Q6_K warp/fast.
 
-**Haiku-San crate** (CPU/GPU hybrid orchestrator) extracted as standalone crate. Role-based decode kernels scaffolded (RoleRMSNormSingle, RoleGEMVDecodeSingle, RoleFlashAttnSingle).
+**Haiku-San** (CPU/GPU hybrid orchestrator) lives in its own repo, outside ironsand; no ironsand crate depends on it. Role-based decode kernels scaffolded (RoleRMSNormSingle, RoleGEMVDecodeSingle, RoleFlashAttnSingle).
 
 
 ## 2026-06-30 — annotation
