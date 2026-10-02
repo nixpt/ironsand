@@ -1,0 +1,32 @@
+[package]
+name = "cuda-oxide-q4k"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "IRONSAND-OXIDE-1 spike: Q4_K decode GEMV ported from ironsand (Rust->PTX via rustc_codegen_nvvm) to cuda-oxide (NVIDIA/cuda-rust), with a CPU oracle and an A/B against the vendored ironsand PTX."
+
+# Standalone crate: its own workspace so the parent ironsand workspace is not
+# affected. (ironsand's root Cargo.toml also excludes `spikes`.)
+[workspace]
+
+[dependencies]
+# cuda-oxide device + host crates. Pinned to the exact rev whose prebuilt
+# codegen backend `cargo oxide setup` publishes, so an external build reuses it.
+# `cargo oxide new` emits these same git deps; see docs/spikes for the local
+# `.cargo/config.toml` `paths` override used during development.
+cuda-device = { git = "https://github.com/NVIDIA/cuda-rust.git", rev = "a0cc6cc0bc18722ec5cdfbea136c118a7c051977" }
+cuda-host   = { git = "https://github.com/NVIDIA/cuda-rust.git", rev = "a0cc6cc0bc18722ec5cdfbea136c118a7c051977" }
+# cuda-core MUST come from the SAME git rev as cuda-host, not crates.io. At this
+# rev the shared host crates were lifted to the git root, so git-root cuda-core
+# and the published crates.io "0.4.0" are *distinct sources* that cargo will not
+# unify — mixing them yields two `DeviceBuffer<T>` types and the generated
+# `#[cuda_module]` launch method stops type-checking. (The `cargo oxide new`
+# scaffold still writes `cuda-core = "0.4.0"`; that recipe does not build at
+# this rev. See docs/spikes/2026-10-cuda-oxide.md.)
+cuda-core = { git = "https://github.com/NVIDIA/cuda-rust.git", rev = "a0cc6cc0bc18722ec5cdfbea136c118a7c051977" }
+# Host-side IEEE f16 <-> f32 for building the deterministic Q4_K bytes + oracle.
+half = "2"
+
+[[bin]]
+name = "cuda-oxide-q4k"
+path = "src/main.rs"

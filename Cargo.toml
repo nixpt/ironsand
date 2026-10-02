@@ -1,5 +1,8 @@
 [workspace]
 resolver = "2"
+# IRONSAND-OXIDE-1 spike lives in its own workspace (own toolchain pin + deps);
+# keep it out of ironsand's workspace so `cargo metadata` here is unaffected.
+exclude = ["spikes"]
 # ironsand: slimmed to the Rust->PTX codegen + host stack needed for zorro
 # inference experiments. Upstream's OptiX (ray tracing), cuDNN, and the
 # non-inference examples were dropped on fork (see ATTRIBUTION.md).
