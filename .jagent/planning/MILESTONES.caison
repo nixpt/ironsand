@@ -1,0 +1,97 @@
+@caison { version: "1.0" }
+# First MILESTONES file for ironsand, written 2026-11-18 (orion, MILESTONES-refresh) from
+# origin/main 080c9e7, tag v0.3.0-typed-kernels, .dejavue/state.md and gh. `milestones import`
+# produced an empty draft (no legacy ROADMAP/TASKS), so this was written by hand.
+
+schema: "milestones/1"
+
+project: {
+  name: "ironsand"
+  kind: "repo"
+  lifecycle: "dormant" ~0.6 @verified { at: "2026-11-18", by: "orion" }
+  home: "zorro"
+  ticket_prefix: "IRONSAND"
+  summary: "hard fork of Rust-GPU/rust-cuda slimmed to rustc_codegen_nvvm + host stack for authoring zorro inference kernels in Rust→PTX (LLVM 19 pinned); last commit 2026-10-02, two PRs open, zorro does not depend on it"
+  north_star: "zorro's GPU decode kernels (GEMV, attention, sampling) authored in Rust and compiled to PTX, at parity with hand-written CUDA"
+  stewards: ["orion", "vega"]
+  stale_after_days: 60
+  evidence: {
+    default_branch: "main"
+  }
+}
+
+milestones: [
+  {
+    id: "typed-kernels"
+    title: "Typed kernels v0.3.0"
+    status: "done" @verified { at: "2026-11-18", by: "orion" }
+    done_at: "2026-06-28"
+    version: "v0.3.0-typed-kernels"
+    done_when: [
+      { claim: "v0.3.0-typed-kernels tagged", check: { kind: "tag", pattern: "v0.3.0-typed-kernels" } },
+    ]
+  },
+  {
+    id: "llvm19-nightly"
+    title: "LLVM 19 sole backend + nightly-2026-04-02 drift migration (phase 3b-3e)"
+    status: "done" @verified { at: "2026-11-18", by: "orion" }
+    done_at: "2026-10-02"
+    done_when: [
+      { claim: "phase-3b: all 7 rustc_codegen_nvvm drift residuals closed", check: { kind: "commit", grep: "phase-3b residual close" } },
+      { claim: "phase-3c: verify_module skipped under llvm19 (libnvvm is the gate)", check: { kind: "commit", grep: "phase-3c: skip verify_module" } },
+      { claim: "Rust kernel → PTX → executed on sm_120 against LLVM 19 + CUDA 13.3 (README Status)", met: true ~0.7 @verified { at: "2026-11-18", by: "orion" } },
+    ]
+    notes: "End-to-end claim is the README's, not re-run on 2026-11-18 (needs the LLVM 19 toolchain at scratch/llvm19)."
+  },
+  {
+    id: "kernel-families"
+    title: "Inference kernel families: GEMV (f32/f16/i8/ternary/Q4_K/Q6_K) + flash attention v7"
+    status: "done" ~0.8 @verified { at: "2026-11-18", by: "orion" }
+    done_when: [
+      { claim: "Q4_K + Q6_K GEMV kernels on main", check: { kind: "file", path: "examples/gemv/kernels/src/gemv_q6k.rs" } },
+      { claim: "ternary dp4a GEMV on main", check: { kind: "file", path: "examples/gemv/kernels/src/gemv_ternary.rs" } },
+      { claim: "flash attention (+ GQA) on main", check: { kind: "file", path: "examples/attn/kernels/src/flash_attn_gqa.rs" } },
+      { claim: "FA v7 6.4 TFLOP/s at H=32 on a 5070 Ti; Q4_K v3 224-269 GB/s, Q6_K ~380 GB/s (dejavue state 2026-06-30)", met: true ~0.6 @verified { at: "2026-11-18", by: "orion" } },
+    ]
+    notes: "Numbers are recorded, not re-measured. The series was declared at plateau."
+  },
+  {
+    id: "cleanup"
+    title: "Fresh-clone workspace: unrelated files and out-of-tree haiku_san dep removed, CI fmt/clippy green"
+    status: "done" @verified { at: "2026-11-18", by: "orion" }
+    done_at: "2026-10-02"
+    done_when: [
+      { claim: "PR #2 merged", check: { kind: "merged", pr: "2" } },
+    ]
+  },
+  {
+    id: "llvm19-provision"
+    title: "Pinned, verified LLVM 19 toolchain provisioning"
+    status: "active" ~0.4 @verified { at: "2026-11-18", by: "orion" }
+    done_when: [
+      { claim: "provision-llvm19.sh merged", check: { kind: "merged", pr: "1" } },
+    ]
+    notes: "PR #1 open (non-draft) since 2026-08-22, no activity since."
+  },
+  {
+    id: "oxide-spike"
+    title: "IRONSAND-OXIDE-1: cuda-oxide vs ironsand on gemv_q4k_fast"
+    status: "active" ~0.4 @verified { at: "2026-11-18", by: "orion" }
+    tickets: ["IRONSAND-OXIDE-1"]
+    done_when: [
+      "spike verdict recorded (keep ironsand, switch to cuda-oxide, or both)",
+      { claim: "spike PR #3 merged or closed with the verdict", check: { kind: "merged", pr: "3" } },
+    ]
+    notes: "Draft PR #3, last updated 2026-10-02."
+  },
+  {
+    id: "zorro-adoption"
+    title: "A zorro production kernel built from ironsand"
+    status: "planned" ~0.3 @verified { at: "2026-11-18", by: "orion" }
+    depends_on: ["oxide-spike"]
+    done_when: [
+      "a zorro crate depends on an ironsand-built kernel behind a feature, REF-Δ gated against the NVRTC kernel it replaces",
+    ]
+    notes: "No zorro crate depends on ironsand on zorro main 2c130b4; zorro builds its kernels via NVRTC. The north star is unproven, hence the low confidence."
+  },
+]
